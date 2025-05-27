@@ -1,0 +1,17 @@
+{
+  "name": "replay_archiver",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@slippi/slippi-js": "^6.7.0",
+    "crypto": "^1.0.1",
+    "proper-lockfile": "^4.1.2"
+  }
+}
