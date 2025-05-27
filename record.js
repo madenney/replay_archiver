@@ -10,21 +10,19 @@ import { fileURLToPath } from 'url';
 import lockfile from 'proper-lockfile';
 
 import { asyncForEach, pad, convertIsoToMmDdYyyyHhMm } from './lib.js';
+import { outputDir, ssbmIsoPath, dolphinPath } from './config.js';
 
 // Define __filename and __dirname for ESM
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const outputDir = '/home/matt/Projects/replay_archiver/output';
-const ssbmIsoPath = '/home/matt/Files/melee/melee(static_fd_background).iso';
-const dolphinPath = '/home/matt/.config/Slippi Launcher/playback/Slippi_Playback-x86_64.AppImage';
-const quality = 7;
+// Configuration constants
+const quality = 2;
 const bitrateKbps = 15000;
-const numWorkers = 4;
+const numWorkers = 8;
 
 // Main function to process replays with a worker pool
 export async function record(replays) {
-
     // Configure Dolphin settings once before processing replays
     await configureDolphin();
 
@@ -45,6 +43,19 @@ async function processReplaysWithWorkers(replays, numWorkers) {
     const workers = [];
     const workerPromises = [];
 
+    // Helper function to get the next non-done replay
+    function getNextNonDoneReplay() {
+        while (replayQueue.length > 0) {
+            const replay = replayQueue.shift();
+            if (!replay.done) {
+                return replay;
+            }
+            completed++;
+            console.log(`Skipping #${replay.index} - Completed ${completed}/${totalReplays} replays`);
+        }
+        return null; // Queue is empty or all remaining replays are done
+    }
+
     // Function to create a new worker
     function createWorker() {
         return new Promise((resolve, reject) => {
@@ -53,45 +64,20 @@ async function processReplaysWithWorkers(replays, numWorkers) {
                 if (msg.status === 'done') {
                     completed++;
                     console.log(`Completed ${completed}/${totalReplays} replays`);
-                    // Process the next replay if available
-                    const nextReplay = replayQueue.shift();
+                    // Process the next non-done replay if available
+                    const nextReplay = getNextNonDoneReplay();
                     if (nextReplay) {
-                        if (nextReplay.done) {
-                            console.log(`Skipping #${nextReplay.index}`);
-                            completed++;
-                            console.log(`Completed ${completed}/${totalReplays} replays`);
-                            const anotherReplay = replayQueue.shift();
-                            if (anotherReplay) {
-                                worker.postMessage(anotherReplay);
-                            } else {
-                                worker.terminate();
-                            }
-                        } else {
-                            worker.postMessage(nextReplay);
-                        }
+                        worker.postMessage(nextReplay);
                     } else {
                         worker.terminate();
                     }
                 } else if (msg.status === 'error') {
                     console.error(`Worker error: ${msg.error}`);
-                    // Optionally handle worker errors (e.g., retry, skip, or terminate)
                     completed++;
                     console.log(`Completed ${completed}/${totalReplays} replays`);
-                    const nextReplay = replayQueue.shift();
+                    const nextReplay = getNextNonDoneReplay();
                     if (nextReplay) {
-                        if (nextReplay.done) {
-                            console.log(`Skipping #${nextReplay.index}`);
-                            completed++;
-                            console.log(`Completed ${completed}/${totalReplays} replays`);
-                            const anotherReplay = replayQueue.shift();
-                            if (anotherReplay) {
-                                worker.postMessage(anotherReplay);
-                            } else {
-                                worker.terminate();
-                            }
-                        } else {
-                            worker.postMessage(nextReplay);
-                        }
+                        worker.postMessage(nextReplay);
                     } else {
                         worker.terminate();
                     }
@@ -113,21 +99,11 @@ async function processReplaysWithWorkers(replays, numWorkers) {
     // Start the worker pool
     for (let i = 0; i < Math.min(numWorkers, replays.length); i++) {
         const workerPromise = createWorker();
-        const replay = replayQueue.shift();
+        const replay = getNextNonDoneReplay();
         if (replay) {
-            if (replay.done) {
-                console.log(`Skipping #${replay.index}`);
-                completed++;
-                console.log(`Completed ${completed}/${totalReplays} replays`);
-                const nextReplay = replayQueue.shift();
-                if (nextReplay) {
-                    workers[i].postMessage(nextReplay);
-                } else {
-                    workers[i].terminate();
-                }
-            } else {
-                workers[i].postMessage(replay);
-            }
+            workers[i].postMessage(replay);
+        } else {
+            workers[i].terminate();
         }
     }
 
@@ -140,7 +116,7 @@ async function processReplaysWithWorkers(replays, numWorkers) {
 if (!isMainThread) {
     parentPort.on('message', async (replay) => {
         try {
-            console.log(`Replay #${replay.index} - ${replay.file_path}`);
+            console.log(`Processing Replay #${replay.index} - ${replay.file_path}`);
             await generateDolphinConfig(replay);
             await run_dolphin(replay);
             await merge_video(replay);
@@ -154,6 +130,58 @@ if (!isMainThread) {
     });
 }
 
+// Video Processing Functions
+async function generateDolphinConfig(replay) {
+    const dolphinConfig = {
+        mode: 'normal',
+        replay: replay.file_path,
+        startFrame: -123,
+        endFrame: replay.game_length_frames - 124,
+        isRealTimeMode: false,
+        commandId: `${crypto.randomBytes(12).toString('hex')}`,
+    };
+    return fsPromises.writeFile(
+        path.join(outputDir, `${pad(replay.index, 6)}.json`),
+        JSON.stringify(dolphinConfig)
+    );
+}
+
+async function run_dolphin(replay) {
+    const fileBasename = pad(replay.index, 6);
+    const dolphinArgs = [
+        '-i',
+        path.resolve(outputDir, `${fileBasename}.json`),
+        '-o',
+        `${fileBasename}-unmerged`,
+        `--output-directory=${outputDir}`,
+        '-b',
+        '-e',
+        ssbmIsoPath,
+        '--cout',
+    ];
+
+    const process = spawn(dolphinPath, dolphinArgs);
+    const exitPromise = exit(process);
+    killDolphinOnEndFrame(process);
+    await exitPromise;
+}
+
+async function merge_video(replay) {
+    const fileBasename = pad(replay.index, 6);
+    const ffmpegMergeArgs = [
+        '-i',
+        path.resolve(outputDir, `${fileBasename}-unmerged.avi`),
+        '-i',
+        path.resolve(outputDir, `${fileBasename}-unmerged.wav`),
+        '-b:v',
+        `${bitrateKbps}k`,
+        path.resolve(outputDir, `${fileBasename}-merged.avi`),
+    ];
+
+    const process = spawn('ffmpeg', ffmpegMergeArgs);
+    await exit(process);
+}
+
 async function add_overlay(replay) {
     const fileBasename = pad(replay.index, 6);
     const overlayArgs = [
@@ -165,26 +193,7 @@ async function add_overlay(replay) {
     ];
 
     const process = spawn('python3', overlayArgs);
-    const exitPromise = exit(process);
-    await exitPromise;
-}
-
-async function merge_video(replay) {
-    const fileBasename = pad(replay.index, 6);
-
-    const ffmpegMergeArgs = [
-        '-i',
-        path.resolve(outputDir, `${fileBasename}-unmerged.avi`),
-        '-i',
-        path.resolve(outputDir, `${fileBasename}-unmerged.wav`),
-        '-b:v',
-        `${bitrateKbps}k`,
-        path.resolve(outputDir, `${fileBasename}-merged.avi`),
-    ];
-    
-    const process = spawn('ffmpeg', ffmpegMergeArgs);
-    const exitPromise = exit(process);
-    await exitPromise;
+    await exit(process);
 }
 
 async function delete_files(replay) {
@@ -205,78 +214,16 @@ async function delete_files(replay) {
     }
 }
 
-async function run_dolphin(replay) {
-    const fileBasename = pad(replay.index, 6);
-
-    const dolphinArgs = [
-        '-i',
-        path.resolve(outputDir, `${fileBasename}.json`),
-        '-o',
-        `${fileBasename}-unmerged`,
-        `--output-directory=${outputDir}`,
-        '-b',
-        '-e',
-        ssbmIsoPath,
-        '--cout',
-    ];
-
-    const process = spawn(dolphinPath, dolphinArgs);
-    const exitPromise = exit(process);
-    killDolphinOnEndFrame(process);
-    await exitPromise;
-}
-
-const exit = (process) =>
-    new Promise((resolve) => {
-        process.on('exit', resolve);
-    });
-
-const killDolphinOnEndFrame = (process) => {
-    let endFrame = Infinity;
-    process.stdout.setEncoding('utf8');
-    process.stdout.on('data', (data) => {
-        const lines = data.split('\r\n');
-        lines.forEach((line) => {
-            if (line.includes(`[PLAYBACK_END_FRAME]`)) {
-                const regex = /\[PLAYBACK_END_FRAME\] ([0-9]*)/;
-                const match = regex.exec(line);
-                endFrame = match && match[1] ? match[1] : Infinity;
-            } else if (line.includes(`[CURRENT_FRAME] ${endFrame}`)) {
-                process.kill();
-            }
-        });
-    });
-};
-
-async function generateDolphinConfig(replay) {
-    const dolphinConfig = {
-        mode: 'normal',
-        replay: replay.file_path,
-        startFrame: -123,
-        endFrame: replay.game_length_frames - 124,
-        isRealTimeMode: false,
-        commandId: `${crypto.randomBytes(12).toString('hex')}`,
-    };
-    return fsPromises.writeFile(
-        path.join(outputDir, `${pad(replay.index, 6)}.json`),
-        JSON.stringify(dolphinConfig)
-    );
-}
-
+// Dolphin Configuration Functions
 async function configureDolphin() {
-    let gameSettingsPath = null;
-    let graphicsSettingsPath = null;
-    let dolphinSettingsPath = null;
-
     const dolphinDirname = path.resolve('/home/matt/.config/SlippiPlayback');
-    gameSettingsPath = path.join(dolphinDirname, 'GameSettings', 'GALE01.ini');
-    graphicsSettingsPath = path.join(dolphinDirname, 'Config', 'GFX.ini');
-    dolphinSettingsPath = path.join(dolphinDirname, 'Config', 'Dolphin.ini');
+    const gameSettingsPath = path.join(dolphinDirname, 'GameSettings', 'GALE01.ini');
+    const graphicsSettingsPath = path.join(dolphinDirname, 'Config', 'GFX.ini');
+    const dolphinSettingsPath = path.join(dolphinDirname, 'Config', 'Dolphin.ini');
 
     // Ensure directories exist and create game settings file if missing
     await fsPromises.mkdir(path.dirname(gameSettingsPath), { recursive: true });
     if (!fs.existsSync(gameSettingsPath)) {
-        console.log('Creating game settings file');
         const fd = await fsPromises.open(gameSettingsPath, 'a');
         await fd.close();
     }
@@ -345,6 +292,29 @@ async function configureDolphin() {
     await fsPromises.writeFile(dolphinSettingsPath, newSettings.join('\n'));
 }
 
+// Utility Functions
+const exit = (process) =>
+    new Promise((resolve) => {
+        process.on('exit', resolve);
+    });
+
+const killDolphinOnEndFrame = (process) => {
+    let endFrame = Infinity;
+    process.stdout.setEncoding('utf8');
+    process.stdout.on('data', (data) => {
+        const lines = data.split('\r\n');
+        lines.forEach((line) => {
+            if (line.includes(`[PLAYBACK_END_FRAME]`)) {
+                const regex = /\[PLAYBACK_END_FRAME\] ([0-9]*)/;
+                const match = regex.exec(line);
+                endFrame = match && match[1] ? match[1] : Infinity;
+            } else if (line.includes(`[CURRENT_FRAME] ${endFrame}`)) {
+                process.kill();
+            }
+        });
+    });
+};
+
 async function markReplayDone(jsonPath, index) {
     try {
         // Acquire a lock on the file
@@ -377,27 +347,3 @@ async function markReplayDone(jsonPath, index) {
         throw error;
     }
 }
-// async function markReplayDone(jsonPath, index) {
-//     try {
-//         // Read the replays.json file
-//         const data = await fsPromises.readFile(jsonPath, 'utf8');
-//         const replays = JSON.parse(data);
-
-//         // Find the replay object where the 'index' field matches the provided value
-//         const replay = replays.find(r => r.index === index);
-//         if (!replay) {
-//             throw new Error(`No replay found with index field value ${index}`);
-//         }
-
-//         // Add the "done: true" field to the matched replay
-//         replay.done = true;
-
-//         // Write the updated replays back to the JSON file
-//         await fsPromises.writeFile(jsonPath, JSON.stringify(replays, null, 2));
-
-//         return replay;
-//     } catch (error) {
-//         console.error('Error in markReplayDone:', error);
-//         throw error;
-//     }
-// }

@@ -5,7 +5,7 @@ import json
 from PIL import Image, ImageDraw, ImageFont
 
 # Path to the font file
-FONT_PATH = '/home/matt/Projects/video_tools/assets/cour_bold.ttf'
+FONT_PATH = '/home/matt/Projects/replay_archiver/cour_bold.ttf'
 
 def get_video_dimensions(video_path):
     """Get the width and height of the video using ffprobe."""
