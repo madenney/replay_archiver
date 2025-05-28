@@ -208,8 +208,12 @@ async function delete_files(replay) {
 
     for (const file of filesToDelete) {
         const filePath = path.resolve(outputDir, file);
-        if (fs.existsSync(filePath)) {
+        try {
             await fsPromises.unlink(filePath);
+        } catch (error) {
+            if (error.code !== 'ENOENT') { // Ignore "file not found" errors
+                console.error(`Failed to delete ${filePath}: ${error.message}`);
+            }
         }
     }
 }
