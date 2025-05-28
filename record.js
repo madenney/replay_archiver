@@ -37,7 +37,7 @@ async function processReplaysWithWorkers(replays, numWorkers) {
     // Worker pool array and status tracking
     const workers = [];
     const workerPromises = [];
-    const workerStatus = new Map(); // Map to track worker status
+    const workerStatus = new Map(); // Map to track worker status and start time
 
     // Helper function to get the next non-done replay
     function getNextNonDoneReplay() {
@@ -52,14 +52,24 @@ async function processReplaysWithWorkers(replays, numWorkers) {
         return null; // Queue is empty or all remaining replays are done
     }
 
-    // Function to display worker statuses
+    // Helper function to format elapsed time as mm:ss
+    function formatElapsedTime(startTime) {
+        const elapsedMs = Date.now() - startTime;
+        const seconds = Math.floor(elapsedMs / 1000);
+        const minutes = Math.floor(seconds / 60);
+        const remainingSeconds = seconds % 60;
+        return `${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
+    }
+
+    // Function to display worker statuses with timers
     function displayWorkerStatuses() {
         console.clear(); // Clear the terminal for a cleaner display
         console.log(`Processing ${totalReplays} replays with ${numWorkers} workers...`);
         console.log(`Completed: ${completed}/${totalReplays}`);
         console.log('\nWorker Statuses:');
-        workerStatus.forEach((status, workerId) => {
-            console.log(`Worker ${workerId}: ${status}`);
+        workerStatus.forEach((statusObj, workerId) => {
+            const elapsedTime = formatElapsedTime(statusObj.startTime);
+            console.log(`Worker ${workerId}: ${statusObj.message} [${elapsedTime}]`);
         });
         console.log('');
     }
@@ -68,11 +78,11 @@ async function processReplaysWithWorkers(replays, numWorkers) {
     function createWorker(workerId) {
         return new Promise((resolve, reject) => {
             const worker = new Worker(__filename, { workerData: { workerId } });
-            workerStatus.set(workerId, 'Idle');
+            workerStatus.set(workerId, { message: 'Idle', startTime: Date.now() });
             worker.on('message', (msg) => {
                 if (msg.status === 'update') {
-                    // Update worker status
-                    workerStatus.set(workerId, msg.message);
+                    // Update worker status and reset timer
+                    workerStatus.set(workerId, { message: msg.message, startTime: Date.now() });
                     displayWorkerStatuses();
                 } else if (msg.status === 'done') {
                     completed++;
@@ -82,7 +92,7 @@ async function processReplaysWithWorkers(replays, numWorkers) {
                     if (nextReplay) {
                         worker.postMessage(nextReplay);
                     } else {
-                        workerStatus.set(workerId, 'Finished');
+                        workerStatus.set(workerId, { message: 'Finished', startTime: Date.now() });
                         displayWorkerStatuses();
                         worker.terminate();
                     }
@@ -94,7 +104,7 @@ async function processReplaysWithWorkers(replays, numWorkers) {
                     if (nextReplay) {
                         worker.postMessage(nextReplay);
                     } else {
-                        workerStatus.set(workerId, 'Finished');
+                        workerStatus.set(workerId, { message: 'Finished', startTime: Date.now() });
                         displayWorkerStatuses();
                         worker.terminate();
                     }
