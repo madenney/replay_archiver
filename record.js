@@ -10,16 +10,11 @@ import { fileURLToPath } from 'url';
 import lockfile from 'proper-lockfile';
 
 import { asyncForEach, pad, convertIsoToMmDdYyyyHhMm } from './lib.js';
-import { outputDir, ssbmIsoPath, dolphinPath } from './config.js';
+import { outputDir, ssbmIsoPath, dolphinPath, quality, bitrateKbps, numWorkers } from './config.js';
 
 // Define __filename and __dirname for ESM
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-// Configuration constants
-const quality = 2;
-const bitrateKbps = 15000;
-const numWorkers = 8;
 
 // Main function to process replays with a worker pool
 export async function record(replays) {
@@ -39,9 +34,10 @@ async function processReplaysWithWorkers(replays, numWorkers) {
     const replayQueue = [...replays];
     let completed = 0;
 
-    // Worker pool array
+    // Worker pool array and status tracking
     const workers = [];
     const workerPromises = [];
+    const workerStatus = new Map(); // Map to track worker status
 
     // Helper function to get the next non-done replay
     function getNextNonDoneReplay() {
@@ -56,12 +52,29 @@ async function processReplaysWithWorkers(replays, numWorkers) {
         return null; // Queue is empty or all remaining replays are done
     }
 
+    // Function to display worker statuses
+    function displayWorkerStatuses() {
+        console.clear(); // Clear the terminal for a cleaner display
+        console.log(`Processing ${totalReplays} replays with ${numWorkers} workers...`);
+        console.log(`Completed: ${completed}/${totalReplays}`);
+        console.log('\nWorker Statuses:');
+        workerStatus.forEach((status, workerId) => {
+            console.log(`Worker ${workerId}: ${status}`);
+        });
+        console.log('');
+    }
+
     // Function to create a new worker
-    function createWorker() {
+    function createWorker(workerId) {
         return new Promise((resolve, reject) => {
-            const worker = new Worker(__filename, { workerData: {} });
+            const worker = new Worker(__filename, { workerData: { workerId } });
+            workerStatus.set(workerId, 'Idle');
             worker.on('message', (msg) => {
-                if (msg.status === 'done') {
+                if (msg.status === 'update') {
+                    // Update worker status
+                    workerStatus.set(workerId, msg.message);
+                    displayWorkerStatuses();
+                } else if (msg.status === 'done') {
                     completed++;
                     console.log(`Completed ${completed}/${totalReplays} replays`);
                     // Process the next non-done replay if available
@@ -69,16 +82,20 @@ async function processReplaysWithWorkers(replays, numWorkers) {
                     if (nextReplay) {
                         worker.postMessage(nextReplay);
                     } else {
+                        workerStatus.set(workerId, 'Finished');
+                        displayWorkerStatuses();
                         worker.terminate();
                     }
                 } else if (msg.status === 'error') {
-                    console.error(`Worker error: ${msg.error}`);
+                    console.error(`Worker ${workerId} error: ${msg.error}`);
                     completed++;
                     console.log(`Completed ${completed}/${totalReplays} replays`);
                     const nextReplay = getNextNonDoneReplay();
                     if (nextReplay) {
                         worker.postMessage(nextReplay);
                     } else {
+                        workerStatus.set(workerId, 'Finished');
+                        displayWorkerStatuses();
                         worker.terminate();
                     }
                 }
@@ -86,8 +103,9 @@ async function processReplaysWithWorkers(replays, numWorkers) {
             worker.on('error', reject);
             worker.on('exit', (code) => {
                 if (code !== 0) {
-                    reject(new Error(`Worker stopped with exit code ${code}`));
+                    reject(new Error(`Worker ${workerId} stopped with exit code ${code}`));
                 } else {
+                    workerStatus.delete(workerId);
                     resolve();
                 }
             });
@@ -98,7 +116,8 @@ async function processReplaysWithWorkers(replays, numWorkers) {
 
     // Start the worker pool
     for (let i = 0; i < Math.min(numWorkers, replays.length); i++) {
-        const workerPromise = createWorker();
+        const workerId = i + 1; // Assign a unique ID to each worker
+        const workerPromise = createWorker(workerId);
         const replay = getNextNonDoneReplay();
         if (replay) {
             workers[i].postMessage(replay);
@@ -109,20 +128,44 @@ async function processReplaysWithWorkers(replays, numWorkers) {
 
     // Wait for all workers to complete
     await Promise.all(workerPromises);
+    console.clear();
     console.log('All replays processed.');
 }
 
 // Worker thread logic
 if (!isMainThread) {
+    const { workerId } = workerData;
+
+    // Helper function to send status updates to the main thread
+    function sendStatus(message) {
+        parentPort.postMessage({ status: 'update', message: `Replay #${replayIndex} - ${message}` });
+    }
+
+    let replayIndex = 0; // Track the current replay index for status updates
+
     parentPort.on('message', async (replay) => {
         try {
-            console.log(`Processing Replay #${replay.index} - ${replay.file_path}`);
+            replayIndex = replay.index;
+            sendStatus('Starting');
+
+            sendStatus('Generating Config');
             await generateDolphinConfig(replay);
+
+            sendStatus('Running Dolphin');
             await run_dolphin(replay);
+
+            sendStatus('Merging Video');
             await merge_video(replay);
+
+            sendStatus('Adding Overlay');
             await add_overlay(replay);
+
+            sendStatus('Deleting Files');
             await delete_files(replay);
+
+            sendStatus('Marking Done');
             await markReplayDone(path.join('replays.json'), replay.index);
+
             parentPort.postMessage({ status: 'done' });
         } catch (error) {
             parentPort.postMessage({ status: 'error', error: error.message });
@@ -211,7 +254,7 @@ async function delete_files(replay) {
         try {
             await fsPromises.unlink(filePath);
         } catch (error) {
-            if (error.code !== 'ENOENT') { // Ignore "file not found" errors
+            if (error.code !== 'ENOENT') {
                 console.error(`Failed to delete ${filePath}: ${error.message}`);
             }
         }
