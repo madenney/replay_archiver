@@ -8,6 +8,7 @@ import os from 'os';
 import { spawn } from 'child_process';
 import { Worker, isMainThread, parentPort, workerData } from 'worker_threads';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 import lockfile from 'proper-lockfile';
 import { google } from 'googleapis';
 
@@ -1062,6 +1063,20 @@ function formatOverlayPlayerFromStored(tag, code) {
 let cachedSlippiGame = null;
 async function loadSlippiGame() {
     if (cachedSlippiGame) return cachedSlippiGame;
+    // Prefer CJS require to avoid ESM import issues on some setups
+    const require = createRequire(import.meta.url);
+    try {
+        const SlippiPkg = require('@slippi/slippi-js');
+        const GameCtor =
+            SlippiPkg.SlippiGame ||
+            (SlippiPkg.default && SlippiPkg.default.SlippiGame);
+        if (GameCtor) {
+            cachedSlippiGame = GameCtor;
+            return GameCtor;
+        }
+    } catch (_) {
+        // ignore, fallback to dynamic import
+    }
     const SlippiPkg = await import('@slippi/slippi-js');
     const GameCtor =
         SlippiPkg.SlippiGame ||
