@@ -1,7 +1,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 
-const replaysPath = path.join('replays.json');
+const replaysPath = process.env.REPLAYS_JSON_PATH || path.join('replays.json');
 const stitchStatePath = path.join('output', 'stitch_state.json');
 
 async function main() {
