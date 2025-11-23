@@ -64,6 +64,7 @@ const stitchTimeoutMs = Number(
 );
 const replaysJsonPath = path.join('replays.json');
 const stitchStatePath = path.join(outputDir, 'stitch_state.json');
+const runLogPath = path.join(outputDir, 'run.log');
 
 // Define __filename and __dirname for ESM
 const __filename = fileURLToPath(import.meta.url);
@@ -81,11 +82,16 @@ export async function record(replays) {
 // Worker pool function to process replays
 async function processReplaysWithWorkers(replays, numWorkers) {
     const totalReplays = replays.length;
-    console.log(`Starting to process ${totalReplays} replays with ${numWorkers} workers...`);
+    const alreadyDone = replays.filter((r) => r.done).length;
+    let completed = alreadyDone;
+    const pendingCount = replays.filter((r) => !r.done).length;
+
+    console.log(
+        `Starting to process ${totalReplays} replays (${alreadyDone} already done) with ${numWorkers} workers...`,
+    );
 
     // Create a queue of replays
     const replayQueue = [...replays];
-    let completed = 0;
 
     // Worker pool array and status tracking
     const workers = [];
@@ -99,8 +105,9 @@ async function processReplaysWithWorkers(replays, numWorkers) {
             if (!replay.done) {
                 return replay;
             }
-            completed++;
-            console.log(`Skipping #${replay.index} - Completed ${completed}/${totalReplays} replays`);
+            console.log(
+                `Skipping #${replay.index} - already marked done (${completed}/${totalReplays} replays complete)`,
+            );
         }
         return null; // Queue is empty or all remaining replays are done
     }
@@ -181,7 +188,11 @@ async function processReplaysWithWorkers(replays, numWorkers) {
     }
 
     // Start the worker pool
-    const workersToStart = Math.min(numWorkers, replays.length);
+    const workersToStart = Math.min(numWorkers, pendingCount);
+    if (workersToStart === 0) {
+        console.log('No pending replays to process.');
+        return;
+    }
     for (let i = 0; i < workersToStart; i++) {
         const workerId = i + 1; // Assign a unique ID to each worker
         const worker = createWorker(workerId);
@@ -299,6 +310,11 @@ async function run_dolphin(replay) {
         '--cout',
     ];
 
+    await appendRunLog(
+        `Dolphin playback for replay #${replay.index}`,
+        dolphinPath,
+        dolphinArgs,
+    );
     const child = spawn(dolphinPath, dolphinArgs);
     killDolphinOnEndFrame(child);
     await runChildProcess(child, {
@@ -320,6 +336,11 @@ async function merge_video(replay) {
         path.resolve(outputDir, `${fileBasename}-merged.avi`),
     ];
 
+    await appendRunLog(
+        `ffmpeg merge for replay #${replay.index}`,
+        'ffmpeg',
+        ffmpegMergeArgs,
+    );
     const child = spawn('ffmpeg', ffmpegMergeArgs);
     await runChildProcess(child, {
         name: 'ffmpeg (merge)',
@@ -338,6 +359,11 @@ async function add_overlay(replay) {
         path.resolve(outputDir, `${fileBasename}-overlay.png`),
     ];
 
+    await appendRunLog(
+        `overlay.py for replay #${replay.index}`,
+        'python3',
+        overlayArgs,
+    );
     const child = spawn('python3', overlayArgs);
     await runChildProcess(child, {
         name: 'overlay.py',
@@ -685,6 +711,13 @@ async function stitchVideos(videoEntries, stitchedPath, concatListPath) {
         stitchedPath,
     ];
 
+    await appendRunLog(
+        `ffmpeg stitch (${videoEntries.length} videos, total ~${Math.round(
+            videoEntries.reduce((a, v) => a + v.duration, 0) / 60,
+        )} min)`,
+        'ffmpeg',
+        args,
+    );
     const child = spawn('ffmpeg', args);
     try {
         await runChildProcess(child, {
@@ -712,6 +745,7 @@ async function getVideoDuration(videoPath) {
             'default=noprint_wrappers=1:nokey=1',
             videoPath,
         ];
+        appendRunLog(`ffprobe duration check for ${videoPath}`, 'ffprobe', args);
         const child = spawn('ffprobe', args);
         let output = '';
         child.stdout?.on('data', (data) => {
@@ -849,6 +883,20 @@ function sanitizeFileName(name) {
 
 function escapeForFfmpegList(str) {
     return str.replace(/'/g, "'\\''");
+}
+
+async function appendRunLog(info, cmd, args = []) {
+    const timestamp = new Date().toISOString();
+    const line = [
+        `[${timestamp}] ${info}`,
+        `Command: ${cmd} ${args.join(' ')}`,
+        '',
+    ].join('\n');
+    try {
+        await fsPromises.appendFile(runLogPath, `${line}\n`);
+    } catch (err) {
+        console.error(`Failed to write to run log: ${err.message}`);
+    }
 }
 
 async function markReplayDone(jsonPath, index) {
