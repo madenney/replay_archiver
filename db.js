@@ -14,6 +14,8 @@ const ALLOWED_UPDATE_FIELDS = new Set([
   'players',
   'codes',
   'game_length_frames',
+  'stitch_pending',
+  'video_duration_seconds',
   'recorded',
   'overlaid',
   'stitched',
@@ -45,6 +47,8 @@ function initSchema() {
       players TEXT,
       codes TEXT,
       game_length_frames INTEGER,
+      stitch_pending INTEGER DEFAULT 0,
+      video_duration_seconds REAL,
       recorded INTEGER DEFAULT 0,
       overlaid INTEGER DEFAULT 0,
       stitched INTEGER DEFAULT 0,
@@ -57,6 +61,16 @@ function initSchema() {
     CREATE INDEX IF NOT EXISTS replays_uploaded_idx ON replays(uploaded);
     CREATE INDEX IF NOT EXISTS replays_overlaid_idx ON replays(overlaid);
   `);
+  try {
+    db.prepare(`ALTER TABLE replays ADD COLUMN stitch_pending INTEGER DEFAULT 0;`).run();
+  } catch (_) {
+    // ignore if already exists
+  }
+  try {
+    db.prepare(`ALTER TABLE replays ADD COLUMN video_duration_seconds REAL;`).run();
+  } catch (_) {
+    // ignore if already exists
+  }
 }
 
 function clearReplays() {
@@ -73,6 +87,8 @@ function toReplayParams(rec) {
     players: rec.players ? JSON.stringify(rec.players) : null,
     codes: rec.codes ? JSON.stringify(rec.codes) : null,
     game_length_frames: rec.game_length_frames ?? null,
+    stitch_pending: rec.stitch_pending ? 1 : 0,
+    video_duration_seconds: rec.video_duration_seconds ?? null,
     recorded: rec.recorded ? 1 : 0,
     overlaid: rec.overlaid ? 1 : 0,
     stitched: rec.stitched ? 1 : 0,
@@ -87,8 +103,8 @@ function insertReplay(rec) {
   const db = getDb();
   db.prepare(
     `INSERT INTO replays
-    (idx, ref_id, file_path, date, players, codes, game_length_frames, recorded, overlaid, stitched, uploaded, skip, claimed_by, claimed_at)
-    VALUES (@idx, @ref_id, @file_path, @date, @players, @codes, @game_length_frames, @recorded, @overlaid, @stitched, @uploaded, @skip, @claimed_by, @claimed_at)`
+    (idx, ref_id, file_path, date, players, codes, game_length_frames, stitch_pending, video_duration_seconds, recorded, overlaid, stitched, uploaded, skip, claimed_by, claimed_at)
+    VALUES (@idx, @ref_id, @file_path, @date, @players, @codes, @game_length_frames, @stitch_pending, @video_duration_seconds, @recorded, @overlaid, @stitched, @uploaded, @skip, @claimed_by, @claimed_at)`
   ).run(toReplayParams(rec));
 }
 
@@ -97,8 +113,8 @@ function insertReplayBatch(records) {
   const db = getDb();
   const stmt = db.prepare(
     `INSERT INTO replays
-    (idx, ref_id, file_path, date, players, codes, game_length_frames, recorded, overlaid, stitched, uploaded, skip, claimed_by, claimed_at)
-    VALUES (@idx, @ref_id, @file_path, @date, @players, @codes, @game_length_frames, @recorded, @overlaid, @stitched, @uploaded, @skip, @claimed_by, @claimed_at)`
+    (idx, ref_id, file_path, date, players, codes, game_length_frames, stitch_pending, video_duration_seconds, recorded, overlaid, stitched, uploaded, skip, claimed_by, claimed_at)
+    VALUES (@idx, @ref_id, @file_path, @date, @players, @codes, @game_length_frames, @stitch_pending, @video_duration_seconds, @recorded, @overlaid, @stitched, @uploaded, @skip, @claimed_by, @claimed_at)`
   );
   const insertMany = db.transaction((rows) => {
     rows.forEach((rec) => {
@@ -119,6 +135,8 @@ function rowToReplay(row) {
     players: row.players ? JSON.parse(row.players) : [],
     codes: row.codes ? JSON.parse(row.codes) : [],
     game_length_frames: row.game_length_frames,
+    stitch_pending: row.stitch_pending,
+    video_duration_seconds: row.video_duration_seconds,
     recorded: !!row.recorded,
     overlaid: !!row.overlaid,
     stitched: !!row.stitched,
@@ -163,15 +181,17 @@ function claimNextReplay(claimTtlMs) {
   const cutoff = new Date(Date.now() - claimTtlMs).toISOString();
   const nowIso = new Date().toISOString();
   const tx = db.transaction(() => {
-    const row = db
-      .prepare(
-        `SELECT * FROM replays
-         WHERE uploaded = 0 AND skip = 0
-           AND (claimed_at IS NULL OR claimed_at < @cutoff)
-         ORDER BY idx
-         LIMIT 1`
-      )
-      .get({ cutoff });
+        const row = db
+          .prepare(
+            `SELECT * FROM replays
+             WHERE uploaded = 0
+               AND skip = 0
+               AND (stitch_pending = 1 OR recorded = 0 OR overlaid = 0 OR stitched = 0)
+               AND (claimed_at IS NULL OR claimed_at < @cutoff)
+             ORDER BY idx
+             LIMIT 1`
+          )
+          .get({ cutoff });
     if (!row) return null;
     db.prepare(
       `UPDATE replays SET claimed_by = @host, claimed_at = @now WHERE id = @id`
