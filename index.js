@@ -18,6 +18,18 @@ async function main(){
         return;
     }
 
+    // Auto-create replays.json if missing
+    try {
+        await fs.access(jsonPath);
+    } catch (err) {
+        if (err.code === 'ENOENT') {
+            console.log(`${jsonPath} not found. Creating...`);
+            await createJSON(jsonPath);
+        } else {
+            throw err;
+        }
+    }
+
     // Read and process the contents of replays.json
     const allReplays = JSON.parse(await fs.readFile(jsonPath, 'utf8'));
     console.log(`Loaded ${allReplays.length} replays`);

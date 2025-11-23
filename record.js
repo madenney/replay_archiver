@@ -1006,7 +1006,10 @@ async function buildOverlayText(replay) {
     let p1 = '';
     let p2 = '';
     try {
-        const names = await getPlayersForReplay(replay.file_path);
+        const names =
+            replay.players && replay.players.length
+                ? replay.players.map((p) => formatOverlayPlayerFromStored(p))
+                : await getPlayersForReplay(replay.file_path);
         p1 = names[0] || '';
         p2 = names[1] || '';
     } catch (err) {
@@ -1050,6 +1053,11 @@ function formatOverlayPlayer(player, fallback) {
     const code = names.code || '';
     if (!tag) return '';
     return code ? `${tag} (${code})` : tag;
+}
+
+function formatOverlayPlayerFromStored(tag) {
+    if (!tag) return '';
+    return tag;
 }
 
 async function markReplaysField(jsonPath, videoEntries, fieldsToSet) {

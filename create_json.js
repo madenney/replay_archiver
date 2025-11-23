@@ -1,5 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
+import { SlippiGame } from '@slippi/slippi-js';
 
 const replay_directory_path = "/media/user/slippi_db/lunar_db/netplay/Hax$";
 const ID_WIDTH = 7; // e.g., 0000001
@@ -54,6 +55,44 @@ function parseDateFromFilename(filePath) {
     return d.toISOString();
 }
 
+async function extractPlayers(filePath) {
+    try {
+        const game = new SlippiGame(filePath);
+        const metadata = game.getMetadata() || {};
+        const players = normalizePlayers(metadata.players);
+        const tags = players.map((p, idx) => formatTag(p, `P${idx + 1}`));
+        const codes = players.map((p) => (p?.names?.code ? p.names.code : ''));
+        return { tags, codes };
+    } catch (err) {
+        return { tags: [], codes: [] };
+    }
+}
+
+function normalizePlayers(playersObj) {
+    if (!playersObj) return [];
+    if (Array.isArray(playersObj)) return playersObj;
+    const entries = Object.entries(playersObj)
+        .map(([k, v]) => {
+            const num = Number(k);
+            return { idx: Number.isNaN(num) ? k : num, data: v };
+        })
+        .sort((a, b) => {
+            if (typeof a.idx === 'number' && typeof b.idx === 'number') {
+                return a.idx - b.idx;
+            }
+            if (typeof a.idx === 'number') return -1;
+            if (typeof b.idx === 'number') return 1;
+            return String(a.idx).localeCompare(String(b.idx));
+        });
+    return entries.map((e) => e.data);
+}
+
+function formatTag(player, fallback) {
+    if (!player) return fallback || '';
+    const names = player.names || {};
+    return names.netplay || names.code || fallback || '';
+}
+
 // Main function to create and return replays.json
 async function createJSON(jsonPath) {
     try {
@@ -76,17 +115,25 @@ async function createJSON(jsonPath) {
         });
 
         // Create array of objects with file paths
-        const replays = withDates.map((entry, idx) => ({
-            file_path: entry.filePath,
-            index: idx + 1,
-            id: padId(idx + 1),
-            date: entry.date || null,
-            recorded: false,
-            overlaid: false,
-            stitched: false,
-            uploaded: false,
-            skip: false,
-        }));
+        const replays = [];
+        for (let i = 0; i < withDates.length; i++) {
+            const entry = withDates[i];
+            const index = i + 1;
+            const { tags, codes } = await extractPlayers(entry.filePath);
+            replays.push({
+                file_path: entry.filePath,
+                index,
+                id: padId(index),
+                date: entry.date || null,
+                players: tags,
+                codes,
+                recorded: false,
+                overlaid: false,
+                stitched: false,
+                uploaded: false,
+                skip: false,
+            });
+        }
 
         // Write to replays.json
         await fs.writeFile(jsonPath, JSON.stringify(replays, null, 2));
