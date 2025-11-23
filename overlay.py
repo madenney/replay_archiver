@@ -40,7 +40,7 @@ def create_text_overlay(video_path, text, overlay_image_path):
     try:
         # Get video dimensions
         width, height = get_video_dimensions(video_path)
-
+ 
         # Create a transparent image matching the video dimensions
         img = Image.new('RGBA', (width, height), (255, 0, 0, 0))
         d = ImageDraw.Draw(img)
