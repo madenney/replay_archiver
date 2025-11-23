@@ -18,12 +18,11 @@ async function main(){
         return;
     }
 
-    // Read and return the contents of replays.json
+    // Read and process the contents of replays.json
     const allReplays = JSON.parse(await fs.readFile(jsonPath, 'utf8'));
-    const pendingReplays = allReplays.filter((replay) => !replay.done);
-    console.log(`Loaded ${allReplays.length} replays, ${pendingReplays.length} pending`);
+    console.log(`Loaded ${allReplays.length} replays`);
 
-    await record(pendingReplays);
+    await record(allReplays);
 
 }
 
