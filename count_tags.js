@@ -1,7 +1,12 @@
 import { promises as fs } from 'fs';
 import path from 'path';
-import SlippiPkg from '@slippi/slippi-js';
-const { SlippiGame } = SlippiPkg;
+import * as SlippiPkg from '@slippi/slippi-js';
+const SlippiGame =
+  SlippiPkg.SlippiGame ||
+  (SlippiPkg.default && SlippiPkg.default.SlippiGame);
+if (!SlippiGame) {
+  throw new Error('Unable to load SlippiGame from @slippi/slippi-js');
+}
 
 async function main() {
   const target = process.argv[2];

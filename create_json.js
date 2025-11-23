@@ -1,7 +1,12 @@
 import fs from 'fs/promises';
 import path from 'path';
-import SlippiPkg from '@slippi/slippi-js';
-const { SlippiGame } = SlippiPkg;
+import * as SlippiPkg from '@slippi/slippi-js';
+const SlippiGame =
+  SlippiPkg.SlippiGame ||
+  (SlippiPkg.default && SlippiPkg.default.SlippiGame);
+if (!SlippiGame) {
+  throw new Error('Unable to load SlippiGame from @slippi/slippi-js');
+}
 
 const replay_directory_path = "/media/user/slippi_db/lunar_db/netplay/Hax$";
 const ID_WIDTH = 7; // e.g., 0000001
