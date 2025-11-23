@@ -9,16 +9,21 @@ import { record } from './record.js';
 const jsonPath = path.join('replays.json');
 
 async function main(){
+    const args = process.argv.slice(2);
 
-    // only need to run this once
-    // await createJSON(jsonPath);
-    // return
+    // Regenerate replays.json and exit
+    if (args.includes('--init') || args.includes('--create-json')) {
+        await createJSON(jsonPath);
+        console.log(`Rebuilt ${jsonPath}`);
+        return;
+    }
 
     // Read and return the contents of replays.json
-    const json = JSON.parse( await fs.readFile(jsonPath, 'utf8'));    
-    console.log(json.length)
+    const allReplays = JSON.parse(await fs.readFile(jsonPath, 'utf8'));
+    const pendingReplays = allReplays.filter((replay) => !replay.done);
+    console.log(`Loaded ${allReplays.length} replays, ${pendingReplays.length} pending`);
 
-    await record(json)
+    await record(pendingReplays);
 
 }
 
