@@ -9,10 +9,18 @@ import { spawn } from 'child_process';
 import { Worker, isMainThread, parentPort, workerData } from 'worker_threads';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
-import lockfile from 'proper-lockfile';
 import { google } from 'googleapis';
 
 import { asyncForEach, pad, convertIsoToMmDdYyyyHhMm } from './lib.js';
+import {
+  getStats,
+  claimNextReplay,
+  updateFlags,
+  releaseClaim,
+  getReadyForStitch,
+  getBlockers,
+  rowToReplay,
+} from './db.js';
 
 const requiredEnvVars = [
   'OUTPUT_DIR',
@@ -68,27 +76,28 @@ const claimTtlMs = Number(
     ? process.env.CLAIM_TTL_MS
     : 24 * 60 * 60 * 1000,
 );
-const replaysJsonPath =
-  process.env.REPLAYS_JSON_PATH || path.join('replays.json');
 const stitchStatePath = path.join(outputDir, 'stitch_state.json');
 const runLogPath = path.join(outputDir, 'run.log');
 const uploadsLogPath = path.join(outputDir, 'uploads.json');
 
-function printRunStats(replays) {
-    const total = replays.length;
-    const uploaded = replays.filter((r) => r.uploaded).length;
-    const stitched = replays.filter((r) => r.stitched).length;
-    const overlaid = replays.filter((r) => r.overlaid).length;
-    const recordedCount = replays.filter((r) => r.recorded).length;
-    const skipped = replays.filter((r) => r.skip).length;
-    const pending = replays.filter((r) => !r.uploaded && !r.skip).length;
-    const claimed = replays.filter((r) => r.claimed_by).length;
+function printRunStats() {
+    const stats = getStats();
+    const {
+        total,
+        uploaded,
+        stitched,
+        overlaid,
+        recorded,
+        skipped,
+        pending,
+        claimed,
+    } = stats;
     console.log('=== Replay Status ===');
     console.log(`Total: ${total}`);
     console.log(`Uploaded: ${uploaded}`);
     console.log(`Stitched (not yet uploaded): ${Math.max(0, stitched - uploaded)}`);
     console.log(`Overlaid (not yet stitched/uploaded): ${Math.max(0, overlaid - stitched)}`);
-    console.log(`Recorded (not yet overlaid/stitched/uploaded): ${Math.max(0, recordedCount - overlaid)}`);
+    console.log(`Recorded (not yet overlaid/stitched/uploaded): ${Math.max(0, recorded - overlaid)}`);
     console.log(`Skipped: ${skipped}`);
     console.log(`Claimed (in-progress): ${claimed}`);
     console.log(`Pending (not uploaded): ${pending}`);
@@ -102,20 +111,20 @@ const __dirname = path.dirname(__filename);
 
 // Main function to process replays with a worker pool
 export async function record(replays) {
-    printRunStats(replays);
+    printRunStats();
     // Configure Dolphin settings once before processing replays
     await configureDolphin();
 
     // Process replays using a worker pool
-    await processReplaysWithWorkers(replays, numWorkers);
+    await processReplaysWithWorkers(numWorkers);
 }
 
 // Worker pool function to process replays
-async function processReplaysWithWorkers(replays, numWorkers) {
-    const totalReplays = replays.length;
-    const alreadyUploaded = replays.filter((r) => r.uploaded).length;
-    let completed = alreadyUploaded;
-    const pendingCount = replays.filter((r) => !r.uploaded && !r.skip).length;
+async function processReplaysWithWorkers(numWorkers) {
+    const stats = getStats();
+    const totalReplays = stats.total;
+    let completed = stats.uploaded;
+    const pendingCount = stats.pending;
 
     console.log(
         `Starting to process ${totalReplays} replays (${alreadyUploaded} already uploaded) with ${numWorkers} workers...`,
@@ -251,7 +260,7 @@ if (!isMainThread) {
             validateReplay(replay);
             replayIndex = replay.index;
             if (replay.skip || replay.uploaded) {
-                await markReplaysField(replaysJsonPath, [replay], { claimed_by: null, claimed_at: null });
+                await markReplaysField([replay], { claimed_by: null, claimed_at: null });
                 parentPort.postMessage({ status: 'done' });
                 return;
             }
@@ -259,7 +268,7 @@ if (!isMainThread) {
             // Fast paths based on existing flags
             if (replay.stitched && !replay.uploaded) {
                 sendStatus('Stitched already; uploading');
-                await markReplaysField(replaysJsonPath, [replay], { stitched: true, claimed_by: null, claimed_at: null });
+                await markReplaysField([replay], { stitched: true, claimed_by: null, claimed_at: null });
                 await maybeStitchAndUpload(replay, sendStatus);
                 parentPort.postMessage({ status: 'done' });
                 return;
@@ -268,7 +277,7 @@ if (!isMainThread) {
             if (replay.overlaid && !replay.stitched) {
                 sendStatus('Already overlaid; stitching/uploading');
                 await maybeStitchAndUpload(replay, sendStatus);
-                await markReplaysField(replaysJsonPath, [replay], { claimed_by: null, claimed_at: null });
+                await markReplaysField([replay], { claimed_by: null, claimed_at: null });
                 parentPort.postMessage({ status: 'done' });
                 return;
             }
@@ -276,12 +285,12 @@ if (!isMainThread) {
             if (replay.recorded && !replay.overlaid) {
                 sendStatus('Already recorded; adding overlay');
                 await add_overlay(replay);
-                await markReplaysField(replaysJsonPath, [replay], { overlaid: true });
+                await markReplaysField([replay], { overlaid: true });
                 sendStatus('Deleting Files');
                 await delete_files(replay);
                 sendStatus('Queueing for Stitch/Upload');
                 await maybeStitchAndUpload(replay, sendStatus);
-                await markReplaysField(replaysJsonPath, [replay], { claimed_by: null, claimed_at: null });
+                await markReplaysField([replay], { claimed_by: null, claimed_at: null });
                 parentPort.postMessage({ status: 'done' });
                 return;
             }
@@ -296,11 +305,11 @@ if (!isMainThread) {
 
             sendStatus('Merging Video');
             await merge_video(replay);
-            await markReplaysField(replaysJsonPath, [replay], { recorded: true });
+            await markReplaysField([replay], { recorded: true });
 
             sendStatus('Adding Overlay');
             await add_overlay(replay);
-            await markReplaysField(replaysJsonPath, [replay], { overlaid: true });
+            await markReplaysField([replay], { overlaid: true });
 
             sendStatus('Deleting Files');
             await delete_files(replay);
@@ -308,7 +317,7 @@ if (!isMainThread) {
             sendStatus('Queueing for Stitch/Upload');
             await maybeStitchAndUpload(replay, sendStatus);
 
-            await markReplaysField(replaysJsonPath, [replay], { claimed_by: null, claimed_at: null });
+            await markReplaysField([replay], { claimed_by: null, claimed_at: null });
             parentPort.postMessage({ status: 'done' });
         } catch (error) {
             try {
@@ -319,7 +328,7 @@ if (!isMainThread) {
                 );
             }
             try {
-                await markReplaysField(replaysJsonPath, [replay], { claimed_by: null, claimed_at: null });
+                await markReplaysField([replay], { claimed_by: null, claimed_at: null });
             } catch (_) {
                 // ignore
             }
@@ -635,18 +644,7 @@ async function maybeStitchAndUpload(replay, sendStatus) {
     await ensureStitchStateFile();
     const release = await lockfile.lock(stitchStatePath, { retries: 5 });
     try {
-        const state = await readJsonFileSafe(stitchStatePath, {
-            queue: [],
-            uploads: [],
-        });
-
-        const replaysData = await readJsonFileSafe(replaysJsonPath, []);
-        // Eligible = not skipped, not uploaded
-        const eligible = replaysData.filter(
-            (r) => r && !r.skip && !r.uploaded,
-        );
-        // Ready for stitch = overlaid
-        const ready = eligible.filter((r) => r.overlaid);
+        const ready = getReadyForStitch();
 
         if (ready.length === 0) {
             return;
@@ -654,11 +652,9 @@ async function maybeStitchAndUpload(replay, sendStatus) {
 
         const readyByIndex = [...ready].sort((a, b) => a.index - b.index);
         const maxReadyIndex = readyByIndex[readyByIndex.length - 1].index;
-        const blockers = eligible.filter(
-            (r) => r.index <= maxReadyIndex && !r.overlaid,
-        );
+        const blockers = getBlockers(maxReadyIndex);
         if (blockers.length > 0) {
-            const blockerIds = blockers.map((b) => b.index).join(', ');
+            const blockerIds = blockers.join(', ');
             console.warn(
                 `Stitch paused: ${blockers.length} unskipped replays <= ${maxReadyIndex} are not overlaid. Mark skip or process them. Blockers: ${blockerIds}`,
             );
@@ -703,12 +699,6 @@ async function maybeStitchAndUpload(replay, sendStatus) {
             0,
         );
 
-        state.queue = videoEntries.map((v) => v.index);
-        await fsPromises.writeFile(
-            stitchStatePath,
-            JSON.stringify(state, null, 2),
-        );
-
         if (totalSeconds < stitchMinTotalMinutes * 60) {
             return;
         }
@@ -730,7 +720,7 @@ async function maybeStitchAndUpload(replay, sendStatus) {
 
         sendStatus?.('Stitching Videos');
         await stitchVideos(videoEntries, stitchedPath, concatListPath);
-        await markReplaysField(replaysJsonPath, videoEntries, {
+        await markReplaysField(videoEntries, {
             stitched: true,
         });
 
@@ -750,7 +740,7 @@ async function maybeStitchAndUpload(replay, sendStatus) {
             return;
         }
 
-        await markReplaysField(replaysJsonPath, videoEntries, {
+        await markReplaysField(videoEntries, {
             uploaded: true,
         });
         await appendUploadsLog({
@@ -762,20 +752,6 @@ async function maybeStitchAndUpload(replay, sendStatus) {
             totalSeconds,
         });
 
-        state.queue = [];
-        state.uploads = state.uploads || [];
-        state.uploads.push({
-            title: finalTitle,
-            stitchedPath,
-            uploadedAt: new Date().toISOString(),
-            videoId: uploadResult?.id || uploadResult?.videoId || null,
-            indices: videoEntries.map((v) => v.index),
-            totalSeconds,
-        });
-        await fsPromises.writeFile(
-            stitchStatePath,
-            JSON.stringify(state, null, 2),
-        );
     } finally {
         await release();
     }
@@ -1101,7 +1077,7 @@ async function loadSlippiGame() {
 
 async function fetchAndSendNext(workerId, worker, workerStatus, totalReplays, onStatus) {
     try {
-        const replay = await claimNextReplay();
+        const replay = claimNextReplay(claimTtlMs);
         if (replay) {
             workerStatus.set(workerId, { message: 'Processing', startTime: Date.now() });
             onStatus?.();
@@ -1119,50 +1095,8 @@ async function fetchAndSendNext(workerId, worker, workerStatus, totalReplays, on
     }
 }
 
-async function claimNextReplay() {
-    const release = await lockfile.lock(replaysJsonPath, { retries: 5 });
-    try {
-        const data = await fsPromises.readFile(replaysJsonPath, 'utf8');
-        const replays = JSON.parse(data);
-        const now = Date.now();
-        const hostname = os.hostname();
-        const replay = replays.find((r) => {
-            if (!r || r.uploaded || r.skip) return false;
-            if (!r.claimed_at || !r.claimed_by) return true;
-            const t = new Date(r.claimed_at).getTime();
-            if (Number.isNaN(t)) return true;
-            return now - t > claimTtlMs;
-        });
-        if (!replay) {
-            return null;
-        }
-        replay.claimed_by = hostname;
-        replay.claimed_at = new Date(now).toISOString();
-        await fsPromises.writeFile(replaysJsonPath, JSON.stringify(replays, null, 2));
-        return replay;
-    } finally {
-        await release();
-    }
-}
 
-async function markReplaysField(jsonPath, videoEntries, fieldsToSet) {
-    try {
-        const release = await lockfile.lock(jsonPath, { retries: 10 });
-        try {
-            const data = await fsPromises.readFile(jsonPath, 'utf8');
-            const replays = JSON.parse(data);
-            const indices = new Set(videoEntries.map((v) => v.index));
-            for (const r of replays) {
-                if (indices.has(r.index)) {
-                    Object.assign(r, fieldsToSet);
-                }
-            }
-            await fsPromises.writeFile(jsonPath, JSON.stringify(replays, null, 2));
-        } finally {
-            await release();
-        }
-    } catch (error) {
-        console.error('Error in markReplaysField:', error);
-        throw error;
-    }
+function markReplaysField(videoEntries, fieldsToSet) {
+    const indices = videoEntries.map((v) => v.index);
+    updateFlags(indices, fieldsToSet);
 }
