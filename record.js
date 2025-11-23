@@ -9,7 +9,6 @@ import { spawn } from 'child_process';
 import { Worker, isMainThread, parentPort, workerData } from 'worker_threads';
 import { fileURLToPath } from 'url';
 import lockfile from 'proper-lockfile';
-import * as SlippiPkg from '@slippi/slippi-js';
 import { google } from 'googleapis';
 
 import { asyncForEach, pad, convertIsoToMmDdYyyyHhMm } from './lib.js';
@@ -63,20 +62,11 @@ const stitchTimeoutMs = Number(
     ? process.env.STITCH_TIMEOUT_MS
     : 4 * 60 * 60 * 1000,
 );
-const replaysJsonPath = path.join('replays.json');
+const replaysJsonPath =
+  process.env.REPLAYS_JSON_PATH || path.join('replays.json');
 const stitchStatePath = path.join(outputDir, 'stitch_state.json');
 const runLogPath = path.join(outputDir, 'run.log');
 const uploadsLogPath = path.join(outputDir, 'uploads.json');
-const haxAliases = (process.env.HAX_ALIASES || 'hax,hax$,hax$money,hax$ the dude,hax money,haxor,hax$money,hax$ ,hax$.')
-  .split(',')
-  .map((s) => s.trim().toLowerCase())
-  .filter(Boolean);
-const SlippiGame =
-  SlippiPkg.SlippiGame ||
-  (SlippiPkg.default && SlippiPkg.default.SlippiGame);
-if (!SlippiGame) {
-  throw new Error('Unable to load SlippiGame from @slippi/slippi-js');
-}
 
 function printRunStats(replays) {
     const total = replays.length;
@@ -1014,7 +1004,9 @@ async function buildOverlayText(replay) {
     try {
         const names =
             replay.players && replay.players.length
-                ? replay.players.map((p) => formatOverlayPlayerFromStored(p))
+                ? replay.players.map((p, idx) =>
+                      formatOverlayPlayerFromStored(p, replay.codes?.[idx]),
+                  )
                 : await getPlayersForReplay(replay.file_path);
         p1 = names[0] || '';
         p2 = names[1] || '';
@@ -1027,6 +1019,7 @@ async function buildOverlayText(replay) {
 }
 
 async function getPlayersForReplay(filePath) {
+    const SlippiGame = await loadSlippiGame();
     const game = new SlippiGame(filePath);
     const metadata = game.getMetadata() || {};
     const players = normalizePlayers(metadata.players);
@@ -1061,9 +1054,23 @@ function formatOverlayPlayer(player, fallback) {
     return code ? `${tag} (${code})` : tag;
 }
 
-function formatOverlayPlayerFromStored(tag) {
+function formatOverlayPlayerFromStored(tag, code) {
     if (!tag) return '';
-    return tag;
+    return code ? `${tag} (${code})` : tag;
+}
+
+let cachedSlippiGame = null;
+async function loadSlippiGame() {
+    if (cachedSlippiGame) return cachedSlippiGame;
+    const SlippiPkg = await import('@slippi/slippi-js');
+    const GameCtor =
+        SlippiPkg.SlippiGame ||
+        (SlippiPkg.default && SlippiPkg.default.SlippiGame);
+    if (!GameCtor) {
+        throw new Error('Unable to load SlippiGame from @slippi/slippi-js');
+    }
+    cachedSlippiGame = GameCtor;
+    return GameCtor;
 }
 
 async function markReplaysField(jsonPath, videoEntries, fieldsToSet) {

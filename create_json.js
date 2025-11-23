@@ -10,6 +10,10 @@ if (!SlippiGame) {
 
 const replay_directory_path = "/media/user/slippi_db/lunar_db/netplay/Hax$";
 const ID_WIDTH = 7; // e.g., 0000001
+const LOG_EVERY = Number(process.env.INIT_PROGRESS_EVERY || 1000);
+const SKIP_METADATA =
+  process.env.INIT_SKIP_METADATA === 'true' ||
+  process.env.SKIP_METADATA === 'true';
 
 // Function to recursively get all .slp file paths
 async function getSlpFiles(dir) {
@@ -61,16 +65,19 @@ function parseDateFromFilename(filePath) {
     return d.toISOString();
 }
 
-async function extractPlayers(filePath) {
+async function extractMetadata(filePath) {
     try {
         const game = new SlippiGame(filePath);
         const metadata = game.getMetadata() || {};
         const players = normalizePlayers(metadata.players);
         const tags = players.map((p, idx) => formatTag(p, `P${idx + 1}`));
         const codes = players.map((p) => (p?.names?.code ? p.names.code : ''));
-        return { tags, codes };
+        const lastFrame =
+            typeof metadata.lastFrame === 'number' ? metadata.lastFrame : null;
+        const startAt = metadata.startAt || null;
+        return { tags, codes, lastFrame, startAt };
     } catch (err) {
-        return { tags: [], codes: [] };
+        return { tags: [], codes: [], lastFrame: null, startAt: null };
     }
 }
 
@@ -125,20 +132,36 @@ async function createJSON(jsonPath) {
         for (let i = 0; i < withDates.length; i++) {
             const entry = withDates[i];
             const index = i + 1;
-            const { tags, codes } = await extractPlayers(entry.filePath);
+            let tags = [];
+            let codes = [];
+            let lastFrame = null;
+            let startAt = entry.date || null;
+            if (!SKIP_METADATA) {
+                const meta = await extractMetadata(entry.filePath);
+                tags = meta.tags;
+                codes = meta.codes;
+                lastFrame = meta.lastFrame;
+                if (meta.startAt) {
+                    startAt = meta.startAt;
+                }
+            }
             replays.push({
                 file_path: entry.filePath,
                 index,
                 id: padId(index),
-                date: entry.date || null,
+                date: startAt,
                 players: tags,
                 codes,
+                game_length_frames: lastFrame,
                 recorded: false,
                 overlaid: false,
                 stitched: false,
                 uploaded: false,
                 skip: false,
             });
+            if ((index % LOG_EVERY === 0) || index === withDates.length) {
+                console.log(`Indexed ${index}/${withDates.length} replays`);
+            }
         }
 
         // Write to replays.json
