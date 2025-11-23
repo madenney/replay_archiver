@@ -12,16 +12,27 @@ export function pad(num, size) {
 }
 
 export function convertIsoToMmDdYyyyHhMm(isoDateString) {
-    // Parse the ISO date string into a Date object
     const date = new Date(isoDateString);
+    if (Number.isNaN(date.getTime())) {
+        throw new Error(`Invalid date: ${isoDateString}`);
+    }
 
-    // Extract components
-    const month = String(date.getUTCMonth() + 1).padStart(2, '0'); // Months are 0-based, so +1
-    const day = String(date.getUTCDate()).padStart(2, '0');
-    const year = date.getUTCFullYear();
-    const hours = String(date.getUTCHours()).padStart(2, '0');
-    const minutes = String(date.getUTCMinutes()).padStart(2, '0');
-
-    // Format as MM/DD/YYYY HH:MM (24-hour, UTC)
-    return `${month}/${day}/${year} ${hours}:${minutes} UTC`;
+    // Format in America/New_York, 24-hour, without timezone suffix
+    const formatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+    });
+    const parts = formatter.formatToParts(date);
+    const lookup = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+    const month = lookup.month || '01';
+    const day = lookup.day || '01';
+    const year = lookup.year || '1970';
+    const hour = lookup.hour || '00';
+    const minute = lookup.minute || '00';
+    return `${month}/${day}/${year} ${hour}:${minute}`;
 }
