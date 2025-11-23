@@ -63,6 +63,11 @@ const stitchTimeoutMs = Number(
     ? process.env.STITCH_TIMEOUT_MS
     : 4 * 60 * 60 * 1000,
 );
+const claimTtlMs = Number(
+  process.env.CLAIM_TTL_MS !== undefined
+    ? process.env.CLAIM_TTL_MS
+    : 24 * 60 * 60 * 1000,
+);
 const replaysJsonPath =
   process.env.REPLAYS_JSON_PATH || path.join('replays.json');
 const stitchStatePath = path.join(outputDir, 'stitch_state.json');
@@ -77,6 +82,7 @@ function printRunStats(replays) {
     const recordedCount = replays.filter((r) => r.recorded).length;
     const skipped = replays.filter((r) => r.skip).length;
     const pending = replays.filter((r) => !r.uploaded && !r.skip).length;
+    const claimed = replays.filter((r) => r.claimed_by).length;
     console.log('=== Replay Status ===');
     console.log(`Total: ${total}`);
     console.log(`Uploaded: ${uploaded}`);
@@ -84,6 +90,7 @@ function printRunStats(replays) {
     console.log(`Overlaid (not yet stitched/uploaded): ${Math.max(0, overlaid - stitched)}`);
     console.log(`Recorded (not yet overlaid/stitched/uploaded): ${Math.max(0, recordedCount - overlaid)}`);
     console.log(`Skipped: ${skipped}`);
+    console.log(`Claimed (in-progress): ${claimed}`);
     console.log(`Pending (not uploaded): ${pending}`);
     console.log(`Progress: ${uploaded}/${total} uploaded`);
     console.log('=====================');
@@ -114,35 +121,11 @@ async function processReplaysWithWorkers(replays, numWorkers) {
         `Starting to process ${totalReplays} replays (${alreadyUploaded} already uploaded) with ${numWorkers} workers...`,
     );
 
-    // Create a queue of replays
-    const replayQueue = [...replays];
-
     // Worker pool array and status tracking
     const workers = [];
     const workerPromises = [];
     const workerStatus = new Map(); // Map to track worker status and start time
     let statusInterval;
-
-    // Helper function to get the next non-done replay
-    function getNextPendingReplay() {
-        while (replayQueue.length > 0) {
-            const replay = replayQueue.shift();
-            if (replay.skip) {
-                completed++;
-                console.log(
-                    `Skipping #${replay.index} - marked skip (${completed}/${totalReplays} replays complete)`,
-                );
-                continue;
-            }
-            if (!replay.uploaded) {
-                return replay;
-            }
-            console.log(
-                `Skipping #${replay.index} - already uploaded (${completed}/${totalReplays} replays complete)`,
-            );
-        }
-        return null; // Queue is empty or all remaining replays are done
-    }
 
     // Helper function to format elapsed time as mm:ss
     function formatElapsedTime(startTime) {
@@ -180,27 +163,16 @@ async function processReplaysWithWorkers(replays, numWorkers) {
                 } else if (msg.status === 'done') {
                     completed++;
                     console.log(`Completed ${completed}/${totalReplays} replays`);
-                    // Process the next non-done replay if available
-                    const nextReplay = getNextPendingReplay();
-                    if (nextReplay) {
-                        worker.postMessage(nextReplay);
-                    } else {
-                        workerStatus.set(workerId, { message: 'Finished', startTime: Date.now() });
+                    void fetchAndSendNext(workerId, worker, workerStatus, totalReplays, () => {
                         displayWorkerStatuses();
-                        worker.terminate();
-                    }
+                    });
                 } else if (msg.status === 'error') {
                     console.error(`Worker ${workerId} error: ${msg.error}`);
                     completed++;
                     console.log(`Finished with error ${completed}/${totalReplays} replays`);
-                    const nextReplay = getNextPendingReplay();
-                    if (nextReplay) {
-                        worker.postMessage(nextReplay);
-                    } else {
-                        workerStatus.set(workerId, { message: 'Finished', startTime: Date.now() });
+                    void fetchAndSendNext(workerId, worker, workerStatus, totalReplays, () => {
                         displayWorkerStatuses();
-                        worker.terminate();
-                    }
+                    });
                 }
             });
             worker.on('error', reject);
@@ -220,20 +192,17 @@ async function processReplaysWithWorkers(replays, numWorkers) {
     }
 
     // Start the worker pool
-        const workersToStart = Math.min(numWorkers, pendingCount);
-        if (workersToStart === 0) {
-            console.log('No pending replays to process.');
-            return;
-        }
+    const workersToStart = Math.min(numWorkers, pendingCount);
+    if (workersToStart === 0) {
+        console.log('No pending replays to process.');
+        return;
+    }
     for (let i = 0; i < workersToStart; i++) {
         const workerId = i + 1; // Assign a unique ID to each worker
         const worker = createWorker(workerId);
-        const replay = getNextPendingReplay();
-        if (replay) {
-            worker.postMessage(replay);
-        } else {
-            worker.terminate();
-        }
+        void fetchAndSendNext(workerId, worker, workerStatus, totalReplays, () => {
+            displayWorkerStatuses();
+        });
     }
 
     // Keep status display ticking
@@ -282,6 +251,7 @@ if (!isMainThread) {
             validateReplay(replay);
             replayIndex = replay.index;
             if (replay.skip || replay.uploaded) {
+                await markReplaysField(replaysJsonPath, [replay], { claimed_by: null, claimed_at: null });
                 parentPort.postMessage({ status: 'done' });
                 return;
             }
@@ -289,7 +259,7 @@ if (!isMainThread) {
             // Fast paths based on existing flags
             if (replay.stitched && !replay.uploaded) {
                 sendStatus('Stitched already; uploading');
-                await markReplaysField(replaysJsonPath, [replay], { stitched: true });
+                await markReplaysField(replaysJsonPath, [replay], { stitched: true, claimed_by: null, claimed_at: null });
                 await maybeStitchAndUpload(replay, sendStatus);
                 parentPort.postMessage({ status: 'done' });
                 return;
@@ -298,6 +268,7 @@ if (!isMainThread) {
             if (replay.overlaid && !replay.stitched) {
                 sendStatus('Already overlaid; stitching/uploading');
                 await maybeStitchAndUpload(replay, sendStatus);
+                await markReplaysField(replaysJsonPath, [replay], { claimed_by: null, claimed_at: null });
                 parentPort.postMessage({ status: 'done' });
                 return;
             }
@@ -310,6 +281,7 @@ if (!isMainThread) {
                 await delete_files(replay);
                 sendStatus('Queueing for Stitch/Upload');
                 await maybeStitchAndUpload(replay, sendStatus);
+                await markReplaysField(replaysJsonPath, [replay], { claimed_by: null, claimed_at: null });
                 parentPort.postMessage({ status: 'done' });
                 return;
             }
@@ -336,6 +308,7 @@ if (!isMainThread) {
             sendStatus('Queueing for Stitch/Upload');
             await maybeStitchAndUpload(replay, sendStatus);
 
+            await markReplaysField(replaysJsonPath, [replay], { claimed_by: null, claimed_at: null });
             parentPort.postMessage({ status: 'done' });
         } catch (error) {
             try {
@@ -344,6 +317,11 @@ if (!isMainThread) {
                 console.error(
                     `Worker ${workerId} cleanup error for replay #${replayIndex}: ${cleanupError.message}`,
                 );
+            }
+            try {
+                await markReplaysField(replaysJsonPath, [replay], { claimed_by: null, claimed_at: null });
+            } catch (_) {
+                // ignore
             }
             parentPort.postMessage({ status: 'error', error: error.message });
         }
@@ -1119,6 +1097,52 @@ async function loadSlippiGame() {
     }
     cachedSlippiGame = GameCtor;
     return GameCtor;
+}
+
+async function fetchAndSendNext(workerId, worker, workerStatus, totalReplays, onStatus) {
+    try {
+        const replay = await claimNextReplay();
+        if (replay) {
+            workerStatus.set(workerId, { message: 'Processing', startTime: Date.now() });
+            onStatus?.();
+            worker.postMessage(replay);
+        } else {
+            workerStatus.set(workerId, { message: 'Finished', startTime: Date.now() });
+            onStatus?.();
+            worker.terminate();
+        }
+    } catch (err) {
+        console.error(`Worker ${workerId} failed to claim next replay: ${err.message}`);
+        workerStatus.set(workerId, { message: 'Finished', startTime: Date.now() });
+        onStatus?.();
+        worker.terminate();
+    }
+}
+
+async function claimNextReplay() {
+    const release = await lockfile.lock(replaysJsonPath, { retries: 5 });
+    try {
+        const data = await fsPromises.readFile(replaysJsonPath, 'utf8');
+        const replays = JSON.parse(data);
+        const now = Date.now();
+        const hostname = os.hostname();
+        const replay = replays.find((r) => {
+            if (!r || r.uploaded || r.skip) return false;
+            if (!r.claimed_at || !r.claimed_by) return true;
+            const t = new Date(r.claimed_at).getTime();
+            if (Number.isNaN(t)) return true;
+            return now - t > claimTtlMs;
+        });
+        if (!replay) {
+            return null;
+        }
+        replay.claimed_by = hostname;
+        replay.claimed_at = new Date(now).toISOString();
+        await fsPromises.writeFile(replaysJsonPath, JSON.stringify(replays, null, 2));
+        return replay;
+    } finally {
+        await release();
+    }
 }
 
 async function markReplaysField(jsonPath, videoEntries, fieldsToSet) {

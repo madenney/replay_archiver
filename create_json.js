@@ -180,6 +180,8 @@ async function createJSON(jsonPath) {
                 stitched: false,
                 uploaded: false,
                 skip: false,
+                claimed_by: null,
+                claimed_at: null,
             });
             if ((index % LOG_EVERY === 0) || index === withDates.length) {
                 console.log(`Indexed ${index}/${withDates.length} replays`);
