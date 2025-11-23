@@ -281,6 +281,21 @@ if (!isMainThread) {
         try {
             validateReplay(replay);
             replayIndex = replay.index;
+            if (replay.skip) {
+                parentPort.postMessage({ status: 'done' });
+                return;
+            }
+            if (replay.uploaded) {
+                parentPort.postMessage({ status: 'done' });
+                return;
+            }
+            if (replay.overlaid) {
+                sendStatus('Already overlaid; skipping recording');
+                await maybeStitchAndUpload(replay, sendStatus);
+                parentPort.postMessage({ status: 'done' });
+                return;
+            }
+
             sendStatus('Starting');
 
             sendStatus('Generating Config');
