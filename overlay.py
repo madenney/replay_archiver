@@ -81,6 +81,7 @@ def overlay_text_on_video(video_path, overlay_image_path, output_video_path):
     print(f"Overlaying image {overlay_image_path} onto video {video_path}")
     cmd = [
         'ffmpeg',
+        '-y',
         '-i', video_path,
         '-i', overlay_image_path,
         '-filter_complex', '[0:v][1:v]scale2ref[vid][ovr];[vid][ovr]overlay=format=auto:0:0',

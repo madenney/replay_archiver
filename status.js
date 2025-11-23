@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { getStats, getBlockers, getReadyForStitch } from './db.js';
 
 async function main() {

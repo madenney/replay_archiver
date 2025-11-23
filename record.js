@@ -10,6 +10,7 @@ import { Worker, isMainThread, parentPort, workerData } from 'worker_threads';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
 import { google } from 'googleapis';
+import lockfile from 'proper-lockfile';
 
 import { asyncForEach, pad, convertIsoToMmDdYyyyHhMm } from './lib.js';
 import {
@@ -111,6 +112,7 @@ const __dirname = path.dirname(__filename);
 
 // Main function to process replays with a worker pool
 export async function record(replays) {
+    console.log('');
     printRunStats();
     // Configure Dolphin settings once before processing replays
     await configureDolphin();
@@ -125,15 +127,17 @@ async function processReplaysWithWorkers(numWorkers) {
     const totalReplays = stats.total;
     let completed = stats.uploaded;
     const pendingCount = stats.pending;
+    const alreadyUploaded = stats.uploaded;
 
     console.log(
-        `Starting to process ${totalReplays} replays (${alreadyUploaded} already uploaded) with ${numWorkers} workers...`,
+        `Starting to process ${pendingCount} pending of ${totalReplays} total replays (${alreadyUploaded} already uploaded) with ${numWorkers} workers...`,
     );
 
     // Worker pool array and status tracking
     const workers = [];
     const workerPromises = [];
     const workerStatus = new Map(); // Map to track worker status and start time
+    const workerTerminationFlags = new Map();
     let statusInterval;
 
     // Helper function to format elapsed time as mm:ss
@@ -147,7 +151,7 @@ async function processReplaysWithWorkers(numWorkers) {
 
     // Function to display worker statuses with timers
     function displayWorkerStatuses() {
-        console.clear(); // Clear the terminal for a cleaner display
+        console.clear();
         console.log(`Processing ${totalReplays} replays with ${numWorkers} workers...`);
         console.log(`Completed: ${completed}/${totalReplays}`);
         console.log('\nWorker Statuses:');
@@ -162,6 +166,7 @@ async function processReplaysWithWorkers(numWorkers) {
     function createWorker(workerId) {
         const worker = new Worker(__filename, { workerData: { workerId } });
         workerStatus.set(workerId, { message: 'Idle', startTime: Date.now() });
+        workerTerminationFlags.set(workerId, { value: false });
 
         const workerPromise = new Promise((resolve, reject) => {
             worker.on('message', (msg) => {
@@ -172,21 +177,22 @@ async function processReplaysWithWorkers(numWorkers) {
                 } else if (msg.status === 'done') {
                     completed++;
                     console.log(`Completed ${completed}/${totalReplays} replays`);
-                    void fetchAndSendNext(workerId, worker, workerStatus, totalReplays, () => {
+                    void fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, totalReplays, () => {
                         displayWorkerStatuses();
                     });
                 } else if (msg.status === 'error') {
                     console.error(`Worker ${workerId} error: ${msg.error}`);
                     completed++;
                     console.log(`Finished with error ${completed}/${totalReplays} replays`);
-                    void fetchAndSendNext(workerId, worker, workerStatus, totalReplays, () => {
+                    void fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, totalReplays, () => {
                         displayWorkerStatuses();
                     });
                 }
             });
             worker.on('error', reject);
             worker.on('exit', (code) => {
-                if (code !== 0) {
+                const terminated = workerTerminationFlags.get(workerId)?.value;
+                if (code !== 0 && !terminated) {
                     reject(new Error(`Worker ${workerId} stopped with exit code ${code}`));
                 } else {
                     workerStatus.delete(workerId);
@@ -209,7 +215,7 @@ async function processReplaysWithWorkers(numWorkers) {
     for (let i = 0; i < workersToStart; i++) {
         const workerId = i + 1; // Assign a unique ID to each worker
         const worker = createWorker(workerId);
-        void fetchAndSendNext(workerId, worker, workerStatus, totalReplays, () => {
+        void fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, totalReplays, () => {
             displayWorkerStatuses();
         });
     }
@@ -253,15 +259,42 @@ if (!isMainThread) {
         parentPort.postMessage({ status: 'update', message: `Replay #${replayIndex} - ${message}` });
     }
 
+    async function finishReplay(replay, reason, { clearStitchPending = false, clearClaim = true } = {}) {
+        const updates = {};
+        if (clearStitchPending) updates.stitch_pending = 0;
+        if (clearClaim) {
+            updates.claimed_by = null;
+            updates.claimed_at = null;
+        } else {
+            updates.claimed_by = os.hostname();
+            updates.claimed_at = new Date().toISOString();
+        }
+        await markReplaysField([replay], updates);
+        await appendRunLog(
+            `Worker ${workerId} finished replay #${replay.index} (${reason}) (recorded=${replay.recorded}, overlaid=${replay.overlaid}, stitched=${replay.stitched}, uploaded=${replay.uploaded}, skip=${replay.skip})`,
+            `worker-${workerId}`,
+            [],
+        );
+        parentPort.postMessage({ status: 'done' });
+    }
+
     let replayIndex = 0; // Track the current replay index for status updates
 
     parentPort.on('message', async (replay) => {
         try {
+            await appendRunLog(
+                `Worker ${workerId} started replay #${replay.index} (recorded=${replay.recorded}, overlaid=${replay.overlaid}, stitched=${replay.stitched}, uploaded=${replay.uploaded}, skip=${replay.skip}, claimed_by=${replay.claimed_by}, claimed_at=${replay.claimed_at})`,
+                `worker-${workerId}`,
+                [],
+            );
             validateReplay(replay);
             replayIndex = replay.index;
+            if (replay.overlaid && !replay.stitched && !replay.stitch_pending) {
+                await markReplaysField([replay], { stitch_pending: 1 });
+                replay.stitch_pending = 1;
+            }
             if (replay.skip || replay.uploaded) {
-                await markReplaysField([replay], { claimed_by: null, claimed_at: null });
-                parentPort.postMessage({ status: 'done' });
+                await finishReplay(replay, 'skip/uploaded fast-path');
                 return;
             }
 
@@ -269,29 +302,48 @@ if (!isMainThread) {
             if (replay.stitched && !replay.uploaded) {
                 sendStatus('Stitched already; uploading');
                 await markReplaysField([replay], { stitched: true, claimed_by: null, claimed_at: null });
-                await maybeStitchAndUpload(replay, sendStatus);
-                parentPort.postMessage({ status: 'done' });
+                const stitchedNow = await maybeStitchAndUpload(replay, sendStatus);
+                await finishReplay(replay, 'stitched fast-path', { clearStitchPending: stitchedNow });
                 return;
             }
 
             if (replay.overlaid && !replay.stitched) {
+                const overlaidPath = path.resolve(outputDir, `${pad(replay.index, 6)}.avi`);
+                if (!(await fileExists(overlaidPath))) {
+                    sendStatus('Overlay missing; resetting flags');
+                    await markReplaysField([replay], {
+                        recorded: 0,
+                        overlaid: 0,
+                        stitch_pending: 0,
+                        claimed_by: null,
+                        claimed_at: null,
+                    });
+                    await finishReplay(replay, 'overlay missing - flags reset');
+                    return;
+                }
+                await ensureVideoDurationStored(replay);
                 sendStatus('Already overlaid; stitching/uploading');
-                await maybeStitchAndUpload(replay, sendStatus);
-                await markReplaysField([replay], { claimed_by: null, claimed_at: null });
-                parentPort.postMessage({ status: 'done' });
+                await markReplaysField([replay], { stitch_pending: 1 });
+                const stitchedNow = await maybeStitchAndUpload(replay, sendStatus);
+                await finishReplay(replay, 'overlaid fast-path', {
+                    clearStitchPending: stitchedNow,
+                    clearClaim: stitchedNow,
+                });
                 return;
             }
 
             if (replay.recorded && !replay.overlaid) {
                 sendStatus('Already recorded; adding overlay');
                 await add_overlay(replay);
-                await markReplaysField([replay], { overlaid: true });
+                await markReplaysField([replay], { overlaid: true, stitch_pending: 1 });
                 sendStatus('Deleting Files');
                 await delete_files(replay);
                 sendStatus('Queueing for Stitch/Upload');
-                await maybeStitchAndUpload(replay, sendStatus);
-                await markReplaysField([replay], { claimed_by: null, claimed_at: null });
-                parentPort.postMessage({ status: 'done' });
+                const stitchedNow = await maybeStitchAndUpload(replay, sendStatus);
+                await finishReplay(replay, 'recorded fast-path', {
+                    clearStitchPending: stitchedNow,
+                    clearClaim: stitchedNow,
+                });
                 return;
             }
 
@@ -309,16 +361,20 @@ if (!isMainThread) {
 
             sendStatus('Adding Overlay');
             await add_overlay(replay);
-            await markReplaysField([replay], { overlaid: true });
+            await markReplaysField([replay], { overlaid: true, stitch_pending: 1 });
+            sendStatus('Overlay complete');
+            await ensureVideoDurationStored(replay);
 
             sendStatus('Deleting Files');
             await delete_files(replay);
 
             sendStatus('Queueing for Stitch/Upload');
-            await maybeStitchAndUpload(replay, sendStatus);
+            const stitchedNow = await maybeStitchAndUpload(replay, sendStatus);
 
-            await markReplaysField([replay], { claimed_by: null, claimed_at: null });
-            parentPort.postMessage({ status: 'done' });
+            await finishReplay(replay, 'full pipeline', {
+                clearStitchPending: stitchedNow,
+                clearClaim: stitchedNow,
+            });
         } catch (error) {
             try {
                 await delete_files(replay);
@@ -384,6 +440,7 @@ async function run_dolphin(replay) {
 async function merge_video(replay) {
     const fileBasename = pad(replay.index, 6);
     const ffmpegMergeArgs = [
+        '-y',
         '-i',
         path.resolve(outputDir, `${fileBasename}-unmerged.avi`),
         '-i',
@@ -632,13 +689,28 @@ const killDolphinOnEndFrame = (child) => {
     });
 };
 
+async function ensureVideoDurationStored(replay) {
+    const fileBasename = pad(replay.index, 6);
+    const finalPath = path.resolve(outputDir, `${fileBasename}.avi`);
+    if (!(await fileExists(finalPath))) return null;
+    if (typeof replay.video_duration_seconds === 'number' && !Number.isNaN(replay.video_duration_seconds)) {
+        return replay.video_duration_seconds;
+    }
+    const duration = await getVideoDuration(finalPath);
+    if (duration != null) {
+        await markReplaysField([replay], { video_duration_seconds: duration });
+        replay.video_duration_seconds = duration;
+    }
+    return duration;
+}
+
 async function maybeStitchAndUpload(replay, sendStatus) {
     if (
         Number.isNaN(stitchMinTotalMinutes) ||
         stitchMinTotalMinutes <= 0 ||
         !archiveTitle
     ) {
-        return;
+        return false;
     }
 
     await ensureStitchStateFile();
@@ -647,35 +719,35 @@ async function maybeStitchAndUpload(replay, sendStatus) {
         const ready = getReadyForStitch();
 
         if (ready.length === 0) {
-            return;
+            return false;
         }
 
         const readyByIndex = [...ready].sort((a, b) => a.index - b.index);
         const maxReadyIndex = readyByIndex[readyByIndex.length - 1].index;
-        const blockers = getBlockers(maxReadyIndex);
-        if (blockers.length > 0) {
-            const blockerIds = blockers.join(', ');
-            console.warn(
-                `Stitch paused: ${blockers.length} unskipped replays <= ${maxReadyIndex} are not overlaid. Mark skip or process them. Blockers: ${blockerIds}`,
-            );
-            return;
+    const videoEntries = [];
+    const missingFiles = [];
+    const missingDurations = [];
+    for (const r of readyByIndex) {
+        const videoPath = path.resolve(outputDir, `${pad(r.index, 6)}.avi`);
+        if (!(await fileExists(videoPath))) {
+            missingFiles.push({ index: r.index, path: videoPath });
+            continue;
         }
-
-        const videoEntries = [];
-        const missingFiles = [];
-        const missingDurations = [];
-        for (const r of readyByIndex) {
-            const videoPath = path.resolve(outputDir, `${pad(r.index, 6)}.avi`);
-            if (!(await fileExists(videoPath))) {
-                missingFiles.push({ index: r.index, path: videoPath });
-                continue;
+        let duration =
+            typeof r.video_duration_seconds === 'number' && !Number.isNaN(r.video_duration_seconds)
+                ? r.video_duration_seconds
+                : null;
+        if (!duration) {
+            duration = await getVideoDuration(videoPath);
+            if (duration != null) {
+                await markReplaysField([r], { video_duration_seconds: duration });
             }
-            const duration = await getVideoDuration(videoPath);
-            if (!duration || Number.isNaN(duration)) {
-                missingDurations.push({ index: r.index, path: videoPath });
-                continue;
-            }
-            videoEntries.push({
+        }
+        if (!duration || Number.isNaN(duration)) {
+            missingDurations.push({ index: r.index, path: videoPath });
+            continue;
+        }
+        videoEntries.push({
                 index: r.index,
                 path: videoPath,
                 duration,
@@ -691,7 +763,7 @@ async function maybeStitchAndUpload(replay, sendStatus) {
             console.warn(
                 `Stitch paused: missing files (${missingFiles.length}) [${missingIdx}] or durations (${missingDurations.length}) [${missingDurIdx}]. Mark skip or regenerate.`,
             );
-            return;
+            return false;
         }
 
         const totalSeconds = videoEntries.reduce(
@@ -700,7 +772,16 @@ async function maybeStitchAndUpload(replay, sendStatus) {
         );
 
         if (totalSeconds < stitchMinTotalMinutes * 60) {
-            return;
+            return false;
+        }
+
+        const blockers = getBlockers(maxReadyIndex);
+        if (blockers.length > 0) {
+            const blockerIds = blockers.join(', ');
+            console.warn(
+                `Stitch paused: ${blockers.length} unskipped replays <= ${maxReadyIndex} are not overlaid. Mark skip or process them. Blockers: ${blockerIds}`,
+            );
+            return false;
         }
 
         const { startDate, endDate } = getDateRange(videoEntries);
@@ -722,6 +803,7 @@ async function maybeStitchAndUpload(replay, sendStatus) {
         await stitchVideos(videoEntries, stitchedPath, concatListPath);
         await markReplaysField(videoEntries, {
             stitched: true,
+            stitch_pending: 0,
         });
 
         sendStatus?.('Uploading to YouTube');
@@ -742,6 +824,7 @@ async function maybeStitchAndUpload(replay, sendStatus) {
 
         await markReplaysField(videoEntries, {
             uploaded: true,
+            stitch_pending: 0,
         });
         await appendUploadsLog({
             title: finalTitle,
@@ -751,6 +834,7 @@ async function maybeStitchAndUpload(replay, sendStatus) {
             indices: videoEntries.map((v) => v.index),
             totalSeconds,
         });
+        return true;
 
     } finally {
         await release();
@@ -961,12 +1045,16 @@ function escapeForFfmpegList(str) {
 async function appendRunLog(info, cmd, args = []) {
     const timestamp = new Date().toISOString();
     const line = [
-        `[${timestamp}] ${info}`,
-        `Command: ${cmd} ${args.join(' ')}`,
-        '',
-    ].join('\n');
+        `[${timestamp}]`,
+        info,
+        cmd && cmd !== 'worker-assign' && !cmd.startsWith('worker-')
+            ? `Command: ${cmd} ${args.join(' ')}`
+            : '',
+    ]
+        .filter(Boolean)
+        .join('\n');
     try {
-        await fsPromises.appendFile(runLogPath, `${line}\n`);
+        await fsPromises.appendFile(runLogPath, `${line}\n\n`);
     } catch (err) {
         console.error(`Failed to write to run log: ${err.message}`);
     }
@@ -1075,22 +1163,31 @@ async function loadSlippiGame() {
     return GameCtor;
 }
 
-async function fetchAndSendNext(workerId, worker, workerStatus, totalReplays, onStatus) {
+async function fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, totalReplays, onStatus) {
     try {
         const replay = claimNextReplay(claimTtlMs);
         if (replay) {
-            workerStatus.set(workerId, { message: 'Processing', startTime: Date.now() });
+            workerStatus.set(workerId, { message: `Replay #${replay.index} - queued`, startTime: Date.now() });
             onStatus?.();
+            await appendRunLog(
+                `Worker ${workerId} assigned replay #${replay.index} (recorded=${replay.recorded}, overlaid=${replay.overlaid}, stitched=${replay.stitched}, uploaded=${replay.uploaded}, skip=${replay.skip}, claimed_by=${replay.claimed_by}, claimed_at=${replay.claimed_at})`,
+                'worker-assign',
+                [],
+            );
             worker.postMessage(replay);
         } else {
             workerStatus.set(workerId, { message: 'Finished', startTime: Date.now() });
             onStatus?.();
+            const flag = workerTerminationFlags.get(workerId);
+            if (flag) flag.value = true;
             worker.terminate();
         }
     } catch (err) {
         console.error(`Worker ${workerId} failed to claim next replay: ${err.message}`);
         workerStatus.set(workerId, { message: 'Finished', startTime: Date.now() });
         onStatus?.();
+        const flag = workerTerminationFlags.get(workerId);
+        if (flag) flag.value = true;
         worker.terminate();
     }
 }
