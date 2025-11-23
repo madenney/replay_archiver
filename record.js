@@ -76,9 +76,10 @@ async function processReplaysWithWorkers(replays, numWorkers) {
 
     // Function to create a new worker
     function createWorker(workerId) {
-        return new Promise((resolve, reject) => {
-            const worker = new Worker(__filename, { workerData: { workerId } });
-            workerStatus.set(workerId, { message: 'Idle', startTime: Date.now() });
+        const worker = new Worker(__filename, { workerData: { workerId } });
+        workerStatus.set(workerId, { message: 'Idle', startTime: Date.now() });
+
+        const workerPromise = new Promise((resolve, reject) => {
             worker.on('message', (msg) => {
                 if (msg.status === 'update') {
                     // Update worker status and reset timer
@@ -119,20 +120,23 @@ async function processReplaysWithWorkers(replays, numWorkers) {
                     resolve();
                 }
             });
-            workers.push(worker);
-            workerPromises.push(resolve);
         });
+
+        workers.push(worker);
+        workerPromises.push(workerPromise);
+        return worker;
     }
 
     // Start the worker pool
-    for (let i = 0; i < Math.min(numWorkers, replays.length); i++) {
+    const workersToStart = Math.min(numWorkers, replays.length);
+    for (let i = 0; i < workersToStart; i++) {
         const workerId = i + 1; // Assign a unique ID to each worker
-        const workerPromise = createWorker(workerId);
+        const worker = createWorker(workerId);
         const replay = getNextNonDoneReplay();
         if (replay) {
-            workers[i].postMessage(replay);
+            worker.postMessage(replay);
         } else {
-            workers[i].terminate();
+            worker.terminate();
         }
     }
 
@@ -146,6 +150,24 @@ async function processReplaysWithWorkers(replays, numWorkers) {
 if (!isMainThread) {
     const { workerId } = workerData;
 
+    function validateReplay(replay) {
+        if (!replay) {
+            throw new Error(`Worker ${workerId}: Received empty replay payload`);
+        }
+        if (typeof replay.index !== 'number') {
+            throw new Error(`Worker ${workerId}: Missing or invalid replay.index`);
+        }
+        if (typeof replay.file_path !== 'string' || replay.file_path.length === 0) {
+            throw new Error(`Worker ${workerId}: Missing replay.file_path for index ${replay.index}`);
+        }
+        if (typeof replay.game_length_frames !== 'number') {
+            throw new Error(`Worker ${workerId}: Missing or invalid game_length_frames for index ${replay.index}`);
+        }
+        if (!replay.date) {
+            throw new Error(`Worker ${workerId}: Missing date for index ${replay.index}`);
+        }
+    }
+
     // Helper function to send status updates to the main thread
     function sendStatus(message) {
         parentPort.postMessage({ status: 'update', message: `Replay #${replayIndex} - ${message}` });
@@ -155,6 +177,7 @@ if (!isMainThread) {
 
     parentPort.on('message', async (replay) => {
         try {
+            validateReplay(replay);
             replayIndex = replay.index;
             sendStatus('Starting');
 
@@ -356,6 +379,10 @@ const exit = (process) =>
     });
 
 const killDolphinOnEndFrame = (process) => {
+    if (!process || !process.stdout) {
+        return;
+    }
+
     let endFrame = Infinity;
     process.stdout.setEncoding('utf8');
     process.stdout.on('data', (data) => {
@@ -364,7 +391,12 @@ const killDolphinOnEndFrame = (process) => {
             if (line.includes(`[PLAYBACK_END_FRAME]`)) {
                 const regex = /\[PLAYBACK_END_FRAME\] ([0-9]*)/;
                 const match = regex.exec(line);
-                endFrame = match && match[1] ? match[1] : Infinity;
+                if (match && match[1]) {
+                    const parsed = parseInt(match[1], 10);
+                    endFrame = Number.isNaN(parsed) ? Infinity : parsed;
+                } else {
+                    endFrame = Infinity;
+                }
             } else if (line.includes(`[CURRENT_FRAME] ${endFrame}`)) {
                 process.kill();
             }
