@@ -9,7 +9,7 @@ import { spawn } from 'child_process';
 import { Worker, isMainThread, parentPort, workerData } from 'worker_threads';
 import { fileURLToPath } from 'url';
 import lockfile from 'proper-lockfile';
-import SlippiPkg from '@slippi/slippi-js';
+import * as SlippiPkg from '@slippi/slippi-js';
 import { google } from 'googleapis';
 
 import { asyncForEach, pad, convertIsoToMmDdYyyyHhMm } from './lib.js';
@@ -71,7 +71,12 @@ const ownAliases = (process.env.CODE_ALIASES || 'own,own$,own$money,own$ the dud
   .split(',')
   .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
-const { SlippiGame } = SlippiPkg;
+const SlippiGame =
+  SlippiPkg.SlippiGame ||
+  (SlippiPkg.default && SlippiPkg.default.SlippiGame);
+if (!SlippiGame) {
+  throw new Error('Unable to load SlippiGame from @slippi/slippi-js');
+}
 
 function printRunStats(replays) {
     const total = replays.length;
