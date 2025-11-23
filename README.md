@@ -14,14 +14,13 @@ A small pipeline to turn Slippi Melee replays into rendered videos with a text o
 1. Install Node dependencies:
    - `npm install`
 2. Configure paths:
-   - Either copy `config_template.js` to `config.js` and edit the values, or
-   - Set environment variables:
-     - `OUTPUT_DIR`
-     - `SSBM_ISO_PATH`
-     - `DOLPHIN_PATH`
-     - (optional) `QUALITY`
-     - (optional) `BITRATE_KBPS`
-     - (optional) `NUM_WORKERS`
+   - Create a `.env` file in the project root, for example:
+     - `OUTPUT_DIR="/path/to/output/dir"`
+     - `SSBM_ISO_PATH="/path/to/ssbm/iso"`
+     - `DOLPHIN_PATH="/path/to/dolphin/executable"`
+     - (optional) `QUALITY=6`
+     - (optional) `BITRATE_KBPS=15000`
+     - (optional) `NUM_WORKERS=2`
 3. Make sure `overlay.py` can find the font at the path defined in `FONT_PATH`.
 
 ### Usage
