@@ -1,12 +1,7 @@
 import { promises as fs } from 'fs';
 import path from 'path';
-import * as SlippiPkg from '@slippi/slippi-js';
-const SlippiGame =
-  SlippiPkg.SlippiGame ||
-  (SlippiPkg.default && SlippiPkg.default.SlippiGame);
-if (!SlippiGame) {
-  throw new Error('Unable to load SlippiGame from @slippi/slippi-js');
-}
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
 
 async function main() {
   const target = process.argv[2];
@@ -25,6 +20,7 @@ async function main() {
 
   for (const file of slpFiles) {
     try {
+      const SlippiGame = await loadSlippiGame();
       const game = new SlippiGame(file);
       const metadata = game.getMetadata() || {};
       const players = normalizePlayers(metadata.players);
@@ -97,6 +93,31 @@ function formatPlayerName(player, fallback) {
     fallback ||
     'Unknown'
   );
+}
+
+let cachedSlippiGame = null;
+async function loadSlippiGame() {
+  if (cachedSlippiGame) return cachedSlippiGame;
+  try {
+    const SlippiPkg = require('@slippi/slippi-js');
+    const GameCtor =
+      SlippiPkg.SlippiGame ||
+      (SlippiPkg.default && SlippiPkg.default.SlippiGame);
+    if (GameCtor) {
+      cachedSlippiGame = GameCtor;
+      return GameCtor;
+    }
+  } catch (_) {
+    // ignore, fallback
+  }
+  const SlippiPkg = await import('@slippi/slippi-js');
+  const GameCtor =
+    SlippiPkg.SlippiGame || (SlippiPkg.default && SlippiPkg.default.SlippiGame);
+  if (!GameCtor) {
+    throw new Error('Unable to load SlippiGame from @slippi/slippi-js');
+  }
+  cachedSlippiGame = GameCtor;
+  return GameCtor;
 }
 
 main().catch((err) => {

@@ -1,12 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import * as SlippiPkg from '@slippi/slippi-js';
-const SlippiGame =
-  SlippiPkg.SlippiGame ||
-  (SlippiPkg.default && SlippiPkg.default.SlippiGame);
-if (!SlippiGame) {
-  throw new Error('Unable to load SlippiGame from @slippi/slippi-js');
-}
+import { createRequire } from 'module';
 
 const replay_directory_path = "/media/user/slippi_db/lunar_db/netplay/Hax$";
 const ID_WIDTH = 7; // e.g., 0000001
@@ -14,6 +8,7 @@ const LOG_EVERY = Number(process.env.INIT_PROGRESS_EVERY || 1000);
 const SKIP_METADATA =
   process.env.INIT_SKIP_METADATA === 'true' ||
   process.env.SKIP_METADATA === 'true';
+const require = createRequire(import.meta.url);
 
 // Function to recursively get all .slp file paths
 async function getSlpFiles(dir) {
@@ -67,6 +62,7 @@ function parseDateFromFilename(filePath) {
 
 async function extractMetadata(filePath) {
     try {
+        const SlippiGame = await loadSlippiGame();
         const game = new SlippiGame(filePath);
         const metadata = game.getMetadata() || {};
         const players = normalizePlayers(metadata.players);
@@ -79,6 +75,32 @@ async function extractMetadata(filePath) {
     } catch (err) {
         return { tags: [], codes: [], lastFrame: null, startAt: null };
     }
+}
+
+let cachedSlippiGame = null;
+async function loadSlippiGame() {
+    if (cachedSlippiGame) return cachedSlippiGame;
+    try {
+        const SlippiPkg = require('@slippi/slippi-js');
+        const GameCtor =
+            SlippiPkg.SlippiGame ||
+            (SlippiPkg.default && SlippiPkg.default.SlippiGame);
+        if (GameCtor) {
+            cachedSlippiGame = GameCtor;
+            return GameCtor;
+        }
+    } catch (_) {
+        // ignore, fallback to dynamic import
+    }
+    const SlippiPkg = await import('@slippi/slippi-js');
+    const GameCtor =
+        SlippiPkg.SlippiGame ||
+        (SlippiPkg.default && SlippiPkg.default.SlippiGame);
+    if (!GameCtor) {
+        throw new Error('Unable to load SlippiGame from @slippi/slippi-js');
+    }
+    cachedSlippiGame = GameCtor;
+    return GameCtor;
 }
 
 function normalizePlayers(playersObj) {
