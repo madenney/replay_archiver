@@ -281,16 +281,34 @@ if (!isMainThread) {
         try {
             validateReplay(replay);
             replayIndex = replay.index;
-            if (replay.skip) {
+            if (replay.skip || replay.uploaded) {
                 parentPort.postMessage({ status: 'done' });
                 return;
             }
-            if (replay.uploaded) {
+
+            // Fast paths based on existing flags
+            if (replay.stitched && !replay.uploaded) {
+                sendStatus('Stitched already; uploading');
+                await markReplaysField(replaysJsonPath, [replay], { stitched: true });
+                await maybeStitchAndUpload(replay, sendStatus);
                 parentPort.postMessage({ status: 'done' });
                 return;
             }
-            if (replay.overlaid) {
-                sendStatus('Already overlaid; skipping recording');
+
+            if (replay.overlaid && !replay.stitched) {
+                sendStatus('Already overlaid; stitching/uploading');
+                await maybeStitchAndUpload(replay, sendStatus);
+                parentPort.postMessage({ status: 'done' });
+                return;
+            }
+
+            if (replay.recorded && !replay.overlaid) {
+                sendStatus('Already recorded; adding overlay');
+                await add_overlay(replay);
+                await markReplaysField(replaysJsonPath, [replay], { overlaid: true });
+                sendStatus('Deleting Files');
+                await delete_files(replay);
+                sendStatus('Queueing for Stitch/Upload');
                 await maybeStitchAndUpload(replay, sendStatus);
                 parentPort.postMessage({ status: 'done' });
                 return;
