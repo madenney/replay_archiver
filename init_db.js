@@ -1,6 +1,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { createRequire } from 'module';
+import { clearReplays, insertReplayBatch } from './db.js';
 
 const replay_directory_path = "/media/user/slippi_db/lunar_db/netplay/Hax$";
 const ID_WIDTH = 7; // e.g., 0000001
@@ -58,6 +59,76 @@ function parseDateFromFilename(filePath) {
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) return null;
     return d.toISOString();
+}
+
+// Main function to create and return replays db
+async function initDB(dbPathIgnored) {
+    try {
+        const slpFilePaths = await getSlpFiles(replay_directory_path);
+        console.log(`Found ${slpFilePaths.length} .slp files`);
+
+        const withDates = slpFilePaths.map((filePath) => {
+            return {
+                filePath,
+                date: parseDateFromFilename(filePath),
+            };
+        });
+        withDates.sort((a, b) => {
+            const at = a.date ? new Date(a.date).getTime() : Infinity;
+            const bt = b.date ? new Date(b.date).getTime() : Infinity;
+            if (at === bt) return a.filePath.localeCompare(b.filePath);
+            return at - bt;
+        });
+
+        clearReplays();
+
+        const toInsert = [];
+
+        for (let i = 0; i < withDates.length; i++) {
+            const entry = withDates[i];
+            const index = i + 1;
+            let tags = [];
+            let codes = [];
+            let lastFrame = null;
+            let startAt = entry.date || null;
+            if (!SKIP_METADATA) {
+                const meta = await extractMetadata(entry.filePath);
+                tags = meta.tags;
+                codes = meta.codes;
+                lastFrame = meta.lastFrame;
+                if (meta.startAt) {
+                    startAt = meta.startAt;
+                }
+            }
+            toInsert.push({
+                file_path: entry.filePath,
+                index,
+                id: padId(index),
+                date: startAt,
+                players: tags,
+                codes,
+                game_length_frames: lastFrame,
+                recorded: false,
+                overlaid: false,
+                stitched: false,
+                uploaded: false,
+                skip: false,
+                claimed_by: null,
+                claimed_at: null,
+            });
+            if ((index % LOG_EVERY === 0) || index === withDates.length) {
+                console.log(`Prepared ${index}/${withDates.length} replays`);
+            }
+        }
+
+        insertReplayBatch(toInsert);
+
+        console.log(`Wrote ${withDates.length} entries to database`);
+
+    } catch (error) {
+        console.error('Error in initDB:', error);
+        throw error;
+    }
 }
 
 async function extractMetadata(filePath) {
@@ -128,74 +199,4 @@ function formatTag(player, fallback) {
     return names.netplay || names.code || fallback || '';
 }
 
-// Main function to create and return replays.json
-async function createJSON(jsonPath) {
-    try {
-        // Get all .slp files using the separate function
-        const slpFilePaths = await getSlpFiles(replay_directory_path);
-        console.log(`Found ${slpFilePaths.length} .slp files`);
-
-        // Sort by date parsed from filename (oldest first)
-        const withDates = slpFilePaths.map((filePath) => {
-            return {
-                filePath,
-                date: parseDateFromFilename(filePath),
-            };
-        });
-        withDates.sort((a, b) => {
-            const at = a.date ? new Date(a.date).getTime() : Infinity;
-            const bt = b.date ? new Date(b.date).getTime() : Infinity;
-            if (at === bt) return a.filePath.localeCompare(b.filePath);
-            return at - bt;
-        });
-
-        // Create array of objects with file paths
-        const replays = [];
-        for (let i = 0; i < withDates.length; i++) {
-            const entry = withDates[i];
-            const index = i + 1;
-            let tags = [];
-            let codes = [];
-            let lastFrame = null;
-            let startAt = entry.date || null;
-            if (!SKIP_METADATA) {
-                const meta = await extractMetadata(entry.filePath);
-                tags = meta.tags;
-                codes = meta.codes;
-                lastFrame = meta.lastFrame;
-                if (meta.startAt) {
-                    startAt = meta.startAt;
-                }
-            }
-            replays.push({
-                file_path: entry.filePath,
-                index,
-                id: padId(index),
-                date: startAt,
-                players: tags,
-                codes,
-                game_length_frames: lastFrame,
-                recorded: false,
-                overlaid: false,
-                stitched: false,
-                uploaded: false,
-                skip: false,
-                claimed_by: null,
-                claimed_at: null,
-            });
-            if ((index % LOG_EVERY === 0) || index === withDates.length) {
-                console.log(`Indexed ${index}/${withDates.length} replays`);
-            }
-        }
-
-        // Write to replays.json
-        await fs.writeFile(jsonPath, JSON.stringify(replays, null, 2));
-        console.log(`Wrote ${replays.length} entries to ${jsonPath}`);
-
-    } catch (error) {
-        console.error('Error in createJSON:', error);
-        throw error;
-    }
-}
-
-export { createJSON }; // Use ESM export syntax
+export { initDB };

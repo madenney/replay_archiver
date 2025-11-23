@@ -8,6 +8,7 @@
     "start": "node index.js"
   },
   "dependencies": {
+    "better-sqlite3": "^9.4.5",
     "dotenv": "^16.6.1",
     "googleapis": "^166.0.0",
     "@slippi/slippi-js": "^6.7.0",

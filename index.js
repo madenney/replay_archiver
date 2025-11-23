@@ -2,45 +2,41 @@
 import path from 'path';
 import fs from 'fs/promises';
 
-import { createJSON } from './create_json.js';
+import { initDB } from './init_db.js';
 import { record } from './record.js';
 //import { analyzeSlippi } from './analyze_slippi.js';
 
-const jsonPath = process.env.REPLAYS_JSON_PATH || path.join('replays.json');
+const dbPath = process.env.REPLAYS_DB_PATH || path.join('replays.db');
 
 async function main(){
     const args = process.argv.slice(2);
 
 // Regenerate replays.json and exit
 if (args.includes('--init') || args.includes('--create-json')) {
-    await createJSON(jsonPath);
-    console.log(`Rebuilt ${jsonPath}`);
+    await initDB(dbPath);
+    console.log(`Rebuilt ${dbPath}`);
     return;
 }
 
 let existed = true;
 try {
-    await fs.access(jsonPath);
+    await fs.access(dbPath);
 } catch (err) {
     if (err.code === 'ENOENT') {
         existed = false;
-        console.log(`${jsonPath} not found. Creating...`);
-        await createJSON(jsonPath);
+        console.log(`${dbPath} not found. Creating...`);
+        await initDB(dbPath);
     } else {
         throw err;
     }
 }
 
 if (!existed) {
-    console.log(`Created ${jsonPath}. Run the script again to start processing.`);
+    console.log(`Created ${dbPath}. Run the script again to start processing.`);
     return;
 }
 
-// Read and process the contents of replays.json
-const allReplays = JSON.parse(await fs.readFile(jsonPath, 'utf8'));
-console.log(`Loaded ${allReplays.length} replays`);
-
-await record(allReplays);
+await record();
 
 }
 
