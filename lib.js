@@ -19,9 +19,9 @@ export function convertIsoToMmDdYyyyHhMm(isoDateString) {
     const month = String(date.getUTCMonth() + 1).padStart(2, '0'); // Months are 0-based, so +1
     const day = String(date.getUTCDate()).padStart(2, '0');
     const year = date.getUTCFullYear();
-    // const hours = String(date.getUTCHours()).padStart(2, '0');
-    // const minutes = String(date.getUTCMinutes()).padStart(2, '0');
+    const hours = String(date.getUTCHours()).padStart(2, '0');
+    const minutes = String(date.getUTCMinutes()).padStart(2, '0');
 
-    // Format as MM/DD/YYYY HH:MM
-    return `${month}/${day}/${year}`;
+    // Format as MM/DD/YYYY HH:MM (24-hour, UTC)
+    return `${month}/${day}/${year} ${hours}:${minutes} UTC`;
 }
