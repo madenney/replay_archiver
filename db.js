@@ -39,23 +39,23 @@ function initSchema() {
   const db = getDb();
   db.exec(`
     CREATE TABLE IF NOT EXISTS replays (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      idx INTEGER UNIQUE NOT NULL,
       ref_id TEXT UNIQUE NOT NULL,
-      file_path TEXT NOT NULL,
       date TEXT,
-      players TEXT,
-      codes TEXT,
       game_length_frames INTEGER,
-      stitch_pending INTEGER DEFAULT 0,
-      video_duration_seconds REAL,
       recorded INTEGER DEFAULT 0,
       overlaid INTEGER DEFAULT 0,
+      stitch_pending INTEGER DEFAULT 0,
       stitched INTEGER DEFAULT 0,
       uploaded INTEGER DEFAULT 0,
+      video_duration_seconds REAL,
       skip INTEGER DEFAULT 0,
       claimed_by TEXT,
-      claimed_at TEXT
+      claimed_at TEXT,
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      idx INTEGER UNIQUE NOT NULL,
+      file_path TEXT NOT NULL,
+      players TEXT,
+      codes TEXT
     );
     CREATE INDEX IF NOT EXISTS replays_idx_idx ON replays(idx);
     CREATE INDEX IF NOT EXISTS replays_uploaded_idx ON replays(uploaded);
@@ -179,19 +179,23 @@ function claimNextReplay(claimTtlMs) {
   const db = getDb();
   const hostname = os.hostname();
   const cutoff = new Date(Date.now() - claimTtlMs).toISOString();
+  const stitchCutoff = new Date(Date.now() - Math.min(claimTtlMs, 60 * 1000)).toISOString();
   const nowIso = new Date().toISOString();
   const tx = db.transaction(() => {
-        const row = db
-          .prepare(
-            `SELECT * FROM replays
-             WHERE uploaded = 0
-               AND skip = 0
-               AND (stitch_pending = 1 OR recorded = 0 OR overlaid = 0 OR stitched = 0)
-               AND (claimed_at IS NULL OR claimed_at < @cutoff)
-             ORDER BY idx
-             LIMIT 1`
-          )
-          .get({ cutoff });
+    const row = db
+      .prepare(
+        `SELECT * FROM replays
+         WHERE uploaded = 0
+           AND skip = 0
+           AND (stitch_pending = 1 OR recorded = 0 OR overlaid = 0 OR stitched = 0)
+           AND (
+                (stitch_pending = 1 AND (claimed_at IS NULL OR claimed_at < @stitchCutoff))
+                OR (stitch_pending != 1 AND (claimed_at IS NULL OR claimed_at < @cutoff))
+           )
+         ORDER BY idx
+         LIMIT 1`
+      )
+      .get({ cutoff, stitchCutoff });
     if (!row) return null;
     db.prepare(
       `UPDATE replays SET claimed_by = @host, claimed_at = @now WHERE id = @id`

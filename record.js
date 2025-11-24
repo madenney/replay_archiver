@@ -175,6 +175,7 @@ async function processReplaysWithWorkers(numWorkers) {
                     workerStatus.set(workerId, { message: msg.message, startTime: Date.now() });
                     displayWorkerStatuses();
                 } else if (msg.status === 'done') {
+                    workerStatus.set(workerId, { message: 'Idle - requesting next', startTime: Date.now() });
                     completed++;
                     console.log(`Completed ${completed}/${totalReplays} replays`);
                     void fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, totalReplays, () => {
@@ -182,6 +183,7 @@ async function processReplaysWithWorkers(numWorkers) {
                     });
                 } else if (msg.status === 'error') {
                     console.error(`Worker ${workerId} error: ${msg.error}`);
+                    workerStatus.set(workerId, { message: 'Idle - retry after error', startTime: Date.now() });
                     completed++;
                     console.log(`Finished with error ${completed}/${totalReplays} replays`);
                     void fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, totalReplays, () => {
@@ -259,10 +261,10 @@ if (!isMainThread) {
         parentPort.postMessage({ status: 'update', message: `Replay #${replayIndex} - ${message}` });
     }
 
-    async function finishReplay(replay, reason, { clearStitchPending = false, clearClaim = true } = {}) {
+    async function finishReplay(replay, reason, { clearStitchPending = false } = {}) {
         const updates = {};
-        if (clearStitchPending) updates.stitch_pending = 0;
-        if (clearClaim) {
+        if (clearStitchPending) {
+            updates.stitch_pending = 0;
             updates.claimed_by = null;
             updates.claimed_at = null;
         } else {
@@ -325,10 +327,7 @@ if (!isMainThread) {
                 sendStatus('Already overlaid; stitching/uploading');
                 await markReplaysField([replay], { stitch_pending: 1 });
                 const stitchedNow = await maybeStitchAndUpload(replay, sendStatus);
-                await finishReplay(replay, 'overlaid fast-path', {
-                    clearStitchPending: stitchedNow,
-                    clearClaim: stitchedNow,
-                });
+                await finishReplay(replay, 'overlaid fast-path', { clearStitchPending: stitchedNow });
                 return;
             }
 
@@ -340,10 +339,7 @@ if (!isMainThread) {
                 await delete_files(replay);
                 sendStatus('Queueing for Stitch/Upload');
                 const stitchedNow = await maybeStitchAndUpload(replay, sendStatus);
-                await finishReplay(replay, 'recorded fast-path', {
-                    clearStitchPending: stitchedNow,
-                    clearClaim: stitchedNow,
-                });
+                await finishReplay(replay, 'recorded fast-path', { clearStitchPending: stitchedNow });
                 return;
             }
 
@@ -395,11 +391,18 @@ if (!isMainThread) {
 
 // Video Processing Functions
 async function generateDolphinConfig(replay) {
+    const lastFrame = typeof replay.game_length_frames === 'number' ? replay.game_length_frames : 0;
+    const startFrame = -123; // lead-in
+    let endFrame = Math.max(0, lastFrame - 1);
+    if (endFrame <= startFrame) {
+        endFrame = startFrame + 1;
+    }
+
     const dolphinConfig = {
         mode: 'normal',
         replay: replay.file_path,
-        startFrame: -123,
-        endFrame: replay.game_length_frames - 124,
+        startFrame,
+        endFrame,
         isRealTimeMode: false,
         commandId: `${crypto.randomBytes(12).toString('hex')}`,
     };
@@ -785,10 +788,10 @@ async function maybeStitchAndUpload(replay, sendStatus) {
         }
 
         const { startDate, endDate } = getDateRange(videoEntries);
+        const safeStart = startDate.replace(/[\/:]/g, '-');
+        const safeEnd = endDate.replace(/[\/:]/g, '-');
         const finalTitle = `${archiveTitle}: ${startDate} - ${endDate}`;
-        const stitchedFileName = `${sanitizeFileName(
-            archiveTitle,
-        )}_${startDate.replace(/\//g, '-')}_${endDate.replace(/\//g, '-')}.mp4`;
+        const stitchedFileName = `${sanitizeFileName(archiveTitle)}_${safeStart}_${safeEnd}.avi`;
         const stitchedPath = path.join(outputDir, stitchedFileName);
         const concatListPath = path.join(outputDir, `concat_${Date.now()}.txt`);
         const description = buildYouTubeDescription({
@@ -846,6 +849,10 @@ async function stitchVideos(videoEntries, stitchedPath, concatListPath) {
         .map((v) => `file '${escapeForFfmpegList(v.path)}'`)
         .join('\n');
     await fsPromises.writeFile(concatListPath, listContent);
+    const exists = await fileExists(concatListPath);
+    if (!exists) {
+        throw new Error(`concat list missing at ${concatListPath}`);
+    }
 
     const args = [
         '-y',
@@ -856,15 +863,17 @@ async function stitchVideos(videoEntries, stitchedPath, concatListPath) {
         '-i',
         concatListPath,
         '-c:v',
-        'libx264',
-        '-preset',
-        'fast',
-        '-crf',
-        '18',
+        'copy',
+        '-b:v',
+        `${bitrateKbps}k`,
+        '-af',
+        'aresample=async=1:first_pts=0',
         '-c:a',
         'aac',
         '-b:a',
-        '192k',
+        '128k',
+        '-fflags',
+        '+genpts',
         stitchedPath,
     ];
 
@@ -882,12 +891,15 @@ async function stitchVideos(videoEntries, stitchedPath, concatListPath) {
             replayIndex: 'stitch',
             timeoutMs: stitchTimeoutMs,
         });
-    } finally {
+        // only remove the concat file on success to help with debugging failures
         try {
             await fsPromises.unlink(concatListPath);
         } catch (_) {
             // ignore
         }
+    } catch (err) {
+        // bubble up stitch errors
+        throw err;
     }
 }
 
@@ -1175,12 +1187,21 @@ async function fetchAndSendNext(workerId, worker, workerStatus, workerTerminatio
                 [],
             );
             worker.postMessage(replay);
-        } else {
-            workerStatus.set(workerId, { message: 'Finished', startTime: Date.now() });
+            return;
+        }
+        const stats = getStats();
+        if (stats.pending > 0) {
+            workerStatus.set(workerId, { message: 'Idle - waiting for next eligible replay', startTime: Date.now() });
             onStatus?.();
-            const flag = workerTerminationFlags.get(workerId);
-            if (flag) flag.value = true;
-            worker.terminate();
+            setTimeout(() => {
+                fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, totalReplays, onStatus);
+            }, 2000);
+        } else {
+            workerStatus.set(workerId, { message: 'Idle - no pending replays (will retry)', startTime: Date.now() });
+            onStatus?.();
+            setTimeout(() => {
+                fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, totalReplays, onStatus);
+            }, 5000);
         }
     } catch (err) {
         console.error(`Worker ${workerId} failed to claim next replay: ${err.message}`);
@@ -1188,7 +1209,9 @@ async function fetchAndSendNext(workerId, worker, workerStatus, workerTerminatio
         onStatus?.();
         const flag = workerTerminationFlags.get(workerId);
         if (flag) flag.value = true;
-        worker.terminate();
+        setTimeout(() => {
+            fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, totalReplays, onStatus);
+        }, 5000);
     }
 }
 
