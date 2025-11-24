@@ -1,25 +1,15 @@
 import 'dotenv/config';
-import { getDb } from './db.js';
+import { initSchema, resetAllFlags, endPool } from './db.js';
 
 async function main() {
-  const db = getDb();
-    const res = db
-      .prepare(
-        `UPDATE replays
-         SET recorded = 0,
-             overlaid = 0,
-             stitched = 0,
-             uploaded = 0,
-             stitch_pending = 0,
-             video_duration_seconds = NULL,
-             claimed_by = NULL,
-             claimed_at = NULL`
-      )
-      .run();
-  console.log(`Reset flags for ${res.changes} replays`);
+  await initSchema();
+  const changed = await resetAllFlags();
+  console.log(`Reset flags for ${changed} replays`);
+  await endPool();
 }
 
 main().catch((err) => {
   console.error(err);
+  void endPool().catch(() => {});
   process.exit(1);
-});
+}).then(() => process.exit(0));

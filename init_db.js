@@ -2,9 +2,10 @@ import 'dotenv/config';
 import fs from 'fs/promises';
 import path from 'path';
 import { createRequire } from 'module';
-import { clearReplays, insertReplayBatch } from './db.js';
+import { clearReplays, insertReplayBatch, initSchema } from './db.js';
 
-const replay_directory_path = "/media/user/slippi_db/lunar_db/netplay/Hax$";
+const replay_directory_path =
+  process.env.REPLAY_DIRECTORY || '/path/to/worker/mount_point/lunar_db/netplay/Hax$';
 const ID_WIDTH = 7; // e.g., 0000001
 const LOG_EVERY = Number(process.env.INIT_PROGRESS_EVERY || 1000);
 const SKIP_METADATA =
@@ -65,6 +66,7 @@ function parseDateFromFilename(filePath) {
 // Main function to create and return replays db
 async function initDB(dbPathIgnored) {
     try {
+        await initSchema();
         const slpFilePaths = await getSlpFiles(replay_directory_path);
         console.log(`Found ${slpFilePaths.length} .slp files`);
 
@@ -81,7 +83,7 @@ async function initDB(dbPathIgnored) {
             return at - bt;
         });
 
-        clearReplays();
+        await clearReplays();
 
         const toInsert = [];
 
@@ -122,7 +124,7 @@ async function initDB(dbPathIgnored) {
             }
         }
 
-        insertReplayBatch(toInsert);
+        await insertReplayBatch(toInsert);
 
         console.log(`Wrote ${withDates.length} entries to database`);
 

@@ -1,8 +1,9 @@
 import 'dotenv/config';
-import { getStats, getBlockers, getReadyForStitch } from './db.js';
+import { getStats, getBlockers, getReadyForStitch, initSchema } from './db.js';
 
 async function main() {
-  const stats = getStats();
+  await initSchema();
+  const stats = await getStats();
   if (stats.total === 0) {
     console.log('No replays loaded.');
     return;
@@ -20,18 +21,18 @@ async function main() {
   console.log(`Progress:  ${stats.uploaded}/${stats.total} uploaded`);
   console.log('=====================');
 
-  reportStitchBlockers();
+  await reportStitchBlockers();
 }
 
-function reportStitchBlockers() {
-  const ready = getReadyForStitch();
+async function reportStitchBlockers() {
+  const ready = await getReadyForStitch();
   if (ready.length === 0) {
     console.log('Stitch: nothing ready yet (no overlaid, non-uploaded replays).');
     return;
   }
   const readyByIndex = [...ready].sort((a, b) => a.index - b.index);
   const maxReadyIndex = readyByIndex[readyByIndex.length - 1].index;
-  const blockers = getBlockers(maxReadyIndex);
+  const blockers = await getBlockers(maxReadyIndex);
   if (blockers.length === 0) {
     console.log('Stitch: ready to run (no blockers before highest ready index).');
   } else {

@@ -1,14 +1,10 @@
 import 'dotenv/config';
 import path from 'path';
-import readline from 'readline';
-import crypto from 'crypto';
 import fs from 'fs';
 import { promises as fsPromises } from 'fs';
 import os from 'os';
-import { spawn } from 'child_process';
 import { Worker, isMainThread, parentPort, workerData } from 'worker_threads';
 import { fileURLToPath } from 'url';
-import { createRequire } from 'module';
 import { google } from 'googleapis';
 import lockfile from 'proper-lockfile';
 
@@ -17,72 +13,49 @@ import {
   getStats,
   claimNextReplay,
   updateFlags,
-  releaseClaim,
   getReadyForStitch,
   getBlockers,
-  rowToReplay,
+  initSchema,
 } from './db.js';
+import { config } from './config.js';
+import { appendRunLog, appendUploadsLog, formatDuration, sanitizeFileName, escapeForFfmpegList, fileExists, readJsonFileSafe } from './util_log.js';
+import { stitchStatePath, uploadsLogPath } from './paths.js';
+import { runChildProcess, killDolphinOnEndFrame, spawnProcess } from './childProc.js';
+import {
+  configureDolphin,
+  generateDolphinConfig,
+  runDolphin,
+  mergeVideo,
+  addOverlay,
+  deleteFiles,
+  ensureVideoDurationStored,
+  buildOverlayText,
+} from './media.js';
+const dbReady = initSchema();
 
-const requiredEnvVars = [
-  'OUTPUT_DIR',
-  'SSBM_ISO_PATH',
-  'DOLPHIN_PATH',
-  'QUALITY',
-  'BITRATE_KBPS',
-  'NUM_WORKERS',
-  'DOLPHIN_TIMEOUT_MS',
-  'FFMPEG_TIMEOUT_MS',
-  'OVERLAY_TIMEOUT_MS',
-  'STITCH_MIN_TOTAL_MINUTES',
-  'ARCHIVE_TITLE',
-  'YOUTUBE_CLIENT_ID',
-  'YOUTUBE_CLIENT_SECRET',
-  'YOUTUBE_REFRESH_TOKEN',
-];
+const {
+    gamesDir,
+    finalDir,
+    ssbmIsoPath,
+    dolphinPath,
+    quality,
+    bitrateKbps,
+    numWorkers,
+    dolphinTimeoutMs,
+    ffmpegTimeoutMs,
+    overlayTimeoutMs,
+    stitchMinTotalMinutes,
+    archiveTitle,
+    youtubeClientId,
+    youtubeClientSecret,
+    youtubeRefreshToken,
+    youtubePrivacy,
+    stitchTimeoutMs,
+    claimTtlMs,
+} = config;
 
-const missingEnvVars = requiredEnvVars.filter(
-  (name) => process.env[name] === undefined || process.env[name] === '',
-);
-
-if (missingEnvVars.length > 0) {
-  throw new Error(
-    `Missing required env vars: ${missingEnvVars.join(
-      ', ',
-    )}. Check your .env file.`,
-  );
-}
-
-const outputDir = process.env.OUTPUT_DIR;
-const ssbmIsoPath = process.env.SSBM_ISO_PATH;
-const dolphinPath = process.env.DOLPHIN_PATH;
-const quality = Number(process.env.QUALITY);
-const bitrateKbps = Number(process.env.BITRATE_KBPS);
-const numWorkers = Number(process.env.NUM_WORKERS);
-const dolphinTimeoutMs = Number(process.env.DOLPHIN_TIMEOUT_MS);
-const ffmpegTimeoutMs = Number(process.env.FFMPEG_TIMEOUT_MS);
-const overlayTimeoutMs = Number(process.env.OVERLAY_TIMEOUT_MS);
-const stitchMinTotalMinutes = Number(process.env.STITCH_MIN_TOTAL_MINUTES);
-const archiveTitle = process.env.ARCHIVE_TITLE;
-const youtubeClientId = process.env.YOUTUBE_CLIENT_ID;
-const youtubeClientSecret = process.env.YOUTUBE_CLIENT_SECRET;
-const youtubeRefreshToken = process.env.YOUTUBE_REFRESH_TOKEN;
-const youtubePrivacy = process.env.YOUTUBE_PRIVACY || 'unlisted';
-const stitchTimeoutMs = Number(
-  process.env.STITCH_TIMEOUT_MS !== undefined
-    ? process.env.STITCH_TIMEOUT_MS
-    : 4 * 60 * 60 * 1000,
-);
-const claimTtlMs = Number(
-  process.env.CLAIM_TTL_MS !== undefined
-    ? process.env.CLAIM_TTL_MS
-    : 24 * 60 * 60 * 1000,
-);
-const stitchStatePath = path.join(outputDir, 'stitch_state.json');
-const runLogPath = path.join(outputDir, 'run.log');
-const uploadsLogPath = path.join(outputDir, 'uploads.json');
-
-function printRunStats() {
-    const stats = getStats();
+async function printRunStats() {
+    const stats = await getStats();
     const {
         total,
         uploaded,
@@ -113,7 +86,10 @@ const __dirname = path.dirname(__filename);
 // Main function to process replays with a worker pool
 export async function record(replays) {
     console.log('');
-    printRunStats();
+    await dbReady;
+    await fsPromises.mkdir(gamesDir, { recursive: true });
+    await fsPromises.mkdir(finalDir, { recursive: true });
+    await printRunStats();
     // Configure Dolphin settings once before processing replays
     await configureDolphin();
 
@@ -123,7 +99,7 @@ export async function record(replays) {
 
 // Worker pool function to process replays
 async function processReplaysWithWorkers(numWorkers) {
-    const stats = getStats();
+    const stats = await getStats();
     const totalReplays = stats.total;
     let completed = stats.uploaded;
     const pendingCount = stats.pending;
@@ -284,6 +260,7 @@ if (!isMainThread) {
 
     parentPort.on('message', async (replay) => {
         try {
+            await dbReady;
             await appendRunLog(
                 `Worker ${workerId} started replay #${replay.index} (recorded=${replay.recorded}, overlaid=${replay.overlaid}, stitched=${replay.stitched}, uploaded=${replay.uploaded}, skip=${replay.skip}, claimed_by=${replay.claimed_by}, claimed_at=${replay.claimed_at})`,
                 `worker-${workerId}`,
@@ -310,7 +287,7 @@ if (!isMainThread) {
             }
 
             if (replay.overlaid && !replay.stitched) {
-                const overlaidPath = path.resolve(outputDir, `${pad(replay.index, 6)}.avi`);
+                const overlaidPath = path.resolve(gamesDir, `${pad(replay.index, 6)}.avi`);
                 if (!(await fileExists(overlaidPath))) {
                     sendStatus('Overlay missing; resetting flags');
                     await markReplaysField([replay], {
@@ -323,7 +300,7 @@ if (!isMainThread) {
                     await finishReplay(replay, 'overlay missing - flags reset');
                     return;
                 }
-                await ensureVideoDurationStored(replay);
+                await ensureVideoDurationStored(replay, markReplaysField, fileExists, getVideoDuration);
                 sendStatus('Already overlaid; stitching/uploading');
                 await markReplaysField([replay], { stitch_pending: 1 });
                 const stitchedNow = await maybeStitchAndUpload(replay, sendStatus);
@@ -333,10 +310,10 @@ if (!isMainThread) {
 
             if (replay.recorded && !replay.overlaid) {
                 sendStatus('Already recorded; adding overlay');
-                await add_overlay(replay);
+                await addOverlay(replay, buildOverlayText);
                 await markReplaysField([replay], { overlaid: true, stitch_pending: 1 });
                 sendStatus('Deleting Files');
-                await delete_files(replay);
+                await deleteFiles(replay);
                 sendStatus('Queueing for Stitch/Upload');
                 const stitchedNow = await maybeStitchAndUpload(replay, sendStatus);
                 await finishReplay(replay, 'recorded fast-path', { clearStitchPending: stitchedNow });
@@ -349,20 +326,20 @@ if (!isMainThread) {
             await generateDolphinConfig(replay);
 
             sendStatus('Running Dolphin');
-            await run_dolphin(replay);
+            await runDolphin(replay);
 
             sendStatus('Merging Video');
-            await merge_video(replay);
+            await mergeVideo(replay);
             await markReplaysField([replay], { recorded: true });
 
             sendStatus('Adding Overlay');
-            await add_overlay(replay);
+            await addOverlay(replay, buildOverlayText);
             await markReplaysField([replay], { overlaid: true, stitch_pending: 1 });
             sendStatus('Overlay complete');
-            await ensureVideoDurationStored(replay);
+            await ensureVideoDurationStored(replay, markReplaysField, fileExists, getVideoDuration);
 
             sendStatus('Deleting Files');
-            await delete_files(replay);
+            await deleteFiles(replay);
 
             sendStatus('Queueing for Stitch/Upload');
             const stitchedNow = await maybeStitchAndUpload(replay, sendStatus);
@@ -373,7 +350,7 @@ if (!isMainThread) {
             });
         } catch (error) {
             try {
-                await delete_files(replay);
+                await deleteFiles(replay);
             } catch (cleanupError) {
                 console.error(
                     `Worker ${workerId} cleanup error for replay #${replayIndex}: ${cleanupError.message}`,
@@ -389,324 +366,6 @@ if (!isMainThread) {
     });
 }
 
-// Video Processing Functions
-async function generateDolphinConfig(replay) {
-    const lastFrame = typeof replay.game_length_frames === 'number' ? replay.game_length_frames : 0;
-    const startFrame = -123; // lead-in
-    let endFrame = Math.max(0, lastFrame - 1);
-    if (endFrame <= startFrame) {
-        endFrame = startFrame + 1;
-    }
-
-    const dolphinConfig = {
-        mode: 'normal',
-        replay: replay.file_path,
-        startFrame,
-        endFrame,
-        isRealTimeMode: false,
-        commandId: `${crypto.randomBytes(12).toString('hex')}`,
-    };
-    return fsPromises.writeFile(
-        path.join(outputDir, `${pad(replay.index, 6)}.json`),
-        JSON.stringify(dolphinConfig)
-    );
-}
-
-async function run_dolphin(replay) {
-    const fileBasename = pad(replay.index, 6);
-    const dolphinArgs = [
-        '-i',
-        path.resolve(outputDir, `${fileBasename}.json`),
-        '-o',
-        `${fileBasename}-unmerged`,
-        `--output-directory=${outputDir}`,
-        '-b',
-        '-e',
-        ssbmIsoPath,
-        '--cout',
-    ];
-
-    await appendRunLog(
-        `Dolphin playback for replay #${replay.index}`,
-        dolphinPath,
-        dolphinArgs,
-    );
-    const child = spawn(dolphinPath, dolphinArgs);
-    killDolphinOnEndFrame(child);
-    await runChildProcess(child, {
-        name: 'Dolphin',
-        replayIndex: replay.index,
-        timeoutMs: dolphinTimeoutMs,
-    });
-}
-
-async function merge_video(replay) {
-    const fileBasename = pad(replay.index, 6);
-    const ffmpegMergeArgs = [
-        '-y',
-        '-i',
-        path.resolve(outputDir, `${fileBasename}-unmerged.avi`),
-        '-i',
-        path.resolve(outputDir, `${fileBasename}-unmerged.wav`),
-        '-b:v',
-        `${bitrateKbps}k`,
-        path.resolve(outputDir, `${fileBasename}-merged.avi`),
-    ];
-
-    await appendRunLog(
-        `ffmpeg merge for replay #${replay.index}`,
-        'ffmpeg',
-        ffmpegMergeArgs,
-    );
-    const child = spawn('ffmpeg', ffmpegMergeArgs);
-    await runChildProcess(child, {
-        name: 'ffmpeg (merge)',
-        replayIndex: replay.index,
-        timeoutMs: ffmpegTimeoutMs,
-    });
-}
-
-async function add_overlay(replay) {
-    const fileBasename = pad(replay.index, 6);
-    const overlayText = await buildOverlayText(replay);
-    const overlayArgs = [
-        path.resolve('./overlay.py'),
-        path.resolve(outputDir, `${fileBasename}-merged.avi`),
-        path.resolve(outputDir, `${fileBasename}.avi`),
-        overlayText,
-        path.resolve(outputDir, `${fileBasename}-overlay.png`),
-    ];
-
-    await appendRunLog(
-        `overlay.py for replay #${replay.index}`,
-        'python3',
-        overlayArgs,
-    );
-    const child = spawn('python3', overlayArgs);
-    await runChildProcess(child, {
-        name: 'overlay.py',
-        replayIndex: replay.index,
-        timeoutMs: overlayTimeoutMs,
-    });
-}
-
-async function delete_files(replay) {
-    const fileBasename = pad(replay.index, 6);
-    const filesToDelete = [
-        `${fileBasename}-unmerged.avi`,
-        `${fileBasename}-unmerged.wav`,
-        `${fileBasename}-merged.avi`,
-        `${fileBasename}-overlay.png`,
-        `${fileBasename}.json`,
-    ];
-
-    for (const file of filesToDelete) {
-        const filePath = path.resolve(outputDir, file);
-        try {
-            await fsPromises.unlink(filePath);
-        } catch (error) {
-            if (error.code !== 'ENOENT') {
-                console.error(`Failed to delete ${filePath}: ${error.message}`);
-            }
-        }
-    }
-}
-
-// Dolphin Configuration Functions
-async function configureDolphin() {
-    const dolphinDirname = path.resolve('/home/user/.config/SlippiPlayback');
-    const gameSettingsPath = path.join(dolphinDirname, 'GameSettings', 'GALE01.ini');
-    const graphicsSettingsPath = path.join(dolphinDirname, 'Config', 'GFX.ini');
-    const dolphinSettingsPath = path.join(dolphinDirname, 'Config', 'Dolphin.ini');
-
-    // Ensure directories exist and create game settings file if missing
-    await fsPromises.mkdir(path.dirname(gameSettingsPath), { recursive: true });
-    if (!fs.existsSync(gameSettingsPath)) {
-        const fd = await fsPromises.open(gameSettingsPath, 'a');
-        await fd.close();
-    }
-
-    if (!fs.existsSync(gameSettingsPath)) {
-        throw new Error('Error: could not find game settings file');
-    }
-
-    // Game settings
-    let newSettings = ['[Gecko]', '[Gecko_Enabled]', '$Optional: Game Music OFF', '$Optional: Widescreen 16:9', '[Gecko_Disabled]'];
-    await fsPromises.writeFile(gameSettingsPath, newSettings.join('\n'));
-
-    // Ensure graphics settings file exists
-    await fsPromises.mkdir(path.dirname(graphicsSettingsPath), { recursive: true });
-    if (!fs.existsSync(graphicsSettingsPath)) {
-        await fsPromises.writeFile(graphicsSettingsPath, '');
-    }
-
-    // Graphics settings
-    let rl = readline.createInterface({
-        input: fs.createReadStream(graphicsSettingsPath),
-        crlfDelay: Infinity,
-    });
-    newSettings = [];
-    const aspectRatioSetting = 6;
-    for await (const line of rl) {
-        if (line.startsWith('AspectRatio')) {
-            newSettings.push(`AspectRatio = ${aspectRatioSetting}`);
-        } else if (line.startsWith('InternalResolutionFrameDumps')) {
-            newSettings.push(`InternalResolutionFrameDumps = True`);
-        } else if (line.startsWith('BitrateKbps')) {
-            newSettings.push(`BitrateKbps = ${bitrateKbps}`);
-        } else if (line.startsWith('EFBScale')) {
-            newSettings.push(`EFBScale = ${quality}`);
-        } else {
-            newSettings.push(line);
-        }
-    }
-    await fsPromises.writeFile(graphicsSettingsPath, newSettings.join('\n'));
-
-    // Ensure Dolphin settings file exists
-    await fsPromises.mkdir(path.dirname(dolphinSettingsPath), { recursive: true });
-    if (!fs.existsSync(dolphinSettingsPath)) {
-        await fsPromises.writeFile(dolphinSettingsPath, '');
-    }
-
-    // Dolphin settings
-    rl = readline.createInterface({
-        input: fs.createReadStream(dolphinSettingsPath),
-        crlfDelay: Infinity,
-    });
-    newSettings = [];
-    for await (const line of rl) {
-        if (line.startsWith('DumpFrames ')) {
-            newSettings.push(`DumpFrames = True`);
-        } else if (line.startsWith('DumpFramesSilent ')) {
-            newSettings.push(`DumpFramesSilent = True`);
-        } else if (line.startsWith('DumpAudio ')) {
-            newSettings.push(`DumpAudio = True`);
-        } else if (line.startsWith('DumpAudioSilent ')) {
-            newSettings.push(`DumpAudioSilent = True`);
-        } else {
-            newSettings.push(line);
-        }
-    }
-    await fsPromises.writeFile(dolphinSettingsPath, newSettings.join('\n'));
-}
-
-// Utility Functions
-const runChildProcess = (child, { name, replayIndex, timeoutMs }) =>
-    new Promise((resolve, reject) => {
-        let finished = false;
-        const logBuffer = [];
-        const pushLog = (prefix, chunk) => {
-            const lines = chunk.toString().split(/\r?\n/).filter(Boolean);
-            lines.forEach((line) => {
-                const entry = `[${prefix}] ${line}`;
-                logBuffer.push(entry);
-                if (logBuffer.length > 50) {
-                    logBuffer.shift();
-                }
-            });
-        };
-
-        if (child.stdout) {
-            child.stdout.on('data', (data) =>
-                pushLog(`${name}#${replayIndex} stdout`, data),
-            );
-        }
-        if (child.stderr) {
-            child.stderr.on('data', (data) =>
-                pushLog(`${name}#${replayIndex} stderr`, data),
-            );
-        }
-
-        const done = (err) => {
-            if (finished) return;
-            finished = true;
-            if (timeout) clearTimeout(timeout);
-            if (err) {
-                console.error(
-                    `${name} failed for replay #${replayIndex}: ${err.message}`,
-                );
-                if (logBuffer.length) {
-                    console.error(logBuffer.slice(-10).join('\n'));
-                }
-                reject(err);
-            } else {
-                resolve();
-            }
-        };
-
-        const timeout =
-            timeoutMs != null
-                ? setTimeout(() => {
-                      const err = new Error(
-                          `${name} timed out for replay #${replayIndex} after ${timeoutMs}ms`,
-                      );
-                      try {
-                          child.kill('SIGKILL');
-                      } catch (_) {
-                          // ignore
-                      }
-                      done(err);
-                  }, timeoutMs)
-                : null;
-
-        child.on('error', (err) => {
-            done(err);
-        });
-
-        child.on('exit', (code, signal) => {
-            if (code === 0) {
-                done();
-            } else {
-                done(
-                    new Error(
-                        `${name} exited with code ${code} (signal ${signal}) for replay #${replayIndex}`,
-                    ),
-                );
-            }
-        });
-    });
-
-const killDolphinOnEndFrame = (child) => {
-    if (!child || !child.stdout) {
-        return;
-    }
-
-    let endFrame = Infinity;
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (data) => {
-        const lines = data.split('\r\n');
-        lines.forEach((line) => {
-            if (line.includes(`[PLAYBACK_END_FRAME]`)) {
-                const regex = /\[PLAYBACK_END_FRAME\] ([0-9]*)/;
-                const match = regex.exec(line);
-                if (match && match[1]) {
-                    const parsed = parseInt(match[1], 10);
-                    endFrame = Number.isNaN(parsed) ? Infinity : parsed;
-                } else {
-                    endFrame = Infinity;
-                }
-            } else if (line.includes(`[CURRENT_FRAME] ${endFrame}`)) {
-                child.kill();
-            }
-        });
-    });
-};
-
-async function ensureVideoDurationStored(replay) {
-    const fileBasename = pad(replay.index, 6);
-    const finalPath = path.resolve(outputDir, `${fileBasename}.avi`);
-    if (!(await fileExists(finalPath))) return null;
-    if (typeof replay.video_duration_seconds === 'number' && !Number.isNaN(replay.video_duration_seconds)) {
-        return replay.video_duration_seconds;
-    }
-    const duration = await getVideoDuration(finalPath);
-    if (duration != null) {
-        await markReplaysField([replay], { video_duration_seconds: duration });
-        replay.video_duration_seconds = duration;
-    }
-    return duration;
-}
-
 async function maybeStitchAndUpload(replay, sendStatus) {
     if (
         Number.isNaN(stitchMinTotalMinutes) ||
@@ -719,7 +378,7 @@ async function maybeStitchAndUpload(replay, sendStatus) {
     await ensureStitchStateFile();
     const release = await lockfile.lock(stitchStatePath, { retries: 5 });
     try {
-        const ready = getReadyForStitch();
+        const ready = await getReadyForStitch();
 
         if (ready.length === 0) {
             return false;
@@ -731,7 +390,7 @@ async function maybeStitchAndUpload(replay, sendStatus) {
     const missingFiles = [];
     const missingDurations = [];
     for (const r of readyByIndex) {
-        const videoPath = path.resolve(outputDir, `${pad(r.index, 6)}.avi`);
+        const videoPath = path.resolve(gamesDir, `${pad(r.index, 6)}.avi`);
         if (!(await fileExists(videoPath))) {
             missingFiles.push({ index: r.index, path: videoPath });
             continue;
@@ -778,7 +437,7 @@ async function maybeStitchAndUpload(replay, sendStatus) {
             return false;
         }
 
-        const blockers = getBlockers(maxReadyIndex);
+        const blockers = await getBlockers(maxReadyIndex);
         if (blockers.length > 0) {
             const blockerIds = blockers.join(', ');
             console.warn(
@@ -792,8 +451,8 @@ async function maybeStitchAndUpload(replay, sendStatus) {
         const safeEnd = endDate.replace(/[\/:]/g, '-');
         const finalTitle = `${archiveTitle}: ${startDate} - ${endDate}`;
         const stitchedFileName = `${sanitizeFileName(archiveTitle)}_${safeStart}_${safeEnd}.avi`;
-        const stitchedPath = path.join(outputDir, stitchedFileName);
-        const concatListPath = path.join(outputDir, `concat_${Date.now()}.txt`);
+        const stitchedPath = path.join(finalDir, stitchedFileName);
+        const concatListPath = path.join(finalDir, `concat_${Date.now()}.txt`);
         const description = buildYouTubeDescription({
             archiveTitle,
             startDate,
@@ -809,22 +468,11 @@ async function maybeStitchAndUpload(replay, sendStatus) {
             stitch_pending: 0,
         });
 
-        sendStatus?.('Uploading to YouTube');
-        let uploadResult;
-        try {
-            uploadResult = await uploadToYouTube({
-                filePath: stitchedPath,
-                title: finalTitle,
-                description,
-            });
-        } catch (err) {
-            console.error(
-                `Upload failed for stitched video ${stitchedPath}: ${err.message}`,
-            );
-            // leave queue intact for retry
-            return;
-        }
-
+        await appendRunLog(
+            `Stitch complete; manual upload required: ${stitchedPath}`,
+            'youtube-upload-skipped',
+            [stitchedPath]
+        );
         await markReplaysField(videoEntries, {
             uploaded: true,
             stitch_pending: 0,
@@ -833,10 +481,29 @@ async function maybeStitchAndUpload(replay, sendStatus) {
             title: finalTitle,
             stitchedPath,
             uploadedAt: new Date().toISOString(),
-            videoId: uploadResult?.id || uploadResult?.videoId || null,
+            videoId: null,
             indices: videoEntries.map((v) => v.index),
             totalSeconds,
+            manual: true,
         });
+        const manifest = {
+            title: finalTitle,
+            stitchedPath,
+            startDate,
+            endDate,
+            indices: videoEntries.map((v) => v.index),
+            totalSeconds,
+        };
+        const manifestPath = path.join(
+            finalDir,
+            `${path.basename(stitchedPath, path.extname(stitchedPath))}.manifest.json`
+        );
+        await fsPromises.writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+        await appendRunLog(
+            `Wrote manifest for ${stitchedPath} -> ${manifestPath}`,
+            'manifest',
+            [manifestPath]
+        );
         return true;
 
     } finally {
@@ -884,7 +551,7 @@ async function stitchVideos(videoEntries, stitchedPath, concatListPath) {
         'ffmpeg',
         args,
     );
-    const child = spawn('ffmpeg', args);
+    const child = spawnProcess('ffmpeg', args);
     try {
         await runChildProcess(child, {
             name: 'ffmpeg (stitch)',
@@ -915,7 +582,7 @@ async function getVideoDuration(videoPath) {
             videoPath,
         ];
         appendRunLog(`ffprobe duration check for ${videoPath}`, 'ffprobe', args);
-        const child = spawn('ffprobe', args);
+        const child = spawnProcess('ffprobe', args);
         let output = '';
         child.stdout?.on('data', (data) => {
             output += data.toString();
@@ -980,22 +647,31 @@ async function uploadToYouTube({ filePath, title, description }) {
         version: 'v3',
         auth: oauth2Client,
     });
-
-    const res = await youtube.videos.insert({
-        part: ['snippet', 'status'],
-        requestBody: {
-            snippet: {
-                title,
-                description,
+    const res = await youtube.videos.insert(
+        {
+            part: ['snippet', 'status'],
+            requestBody: {
+                snippet: {
+                    title,
+                    description,
+                },
+                status: {
+                    privacyStatus: youtubePrivacy,
+                },
             },
-            status: {
-                privacyStatus: youtubePrivacy,
+            media: {
+                body: fs.createReadStream(filePath),
             },
         },
-        media: {
-            body: fs.createReadStream(filePath),
-        },
-    });
+        {
+            onUploadProgress: (evt) => {
+                // optional: could log progress
+            },
+            onUploadError: (err) => {
+                throw err;
+            },
+        }
+    );
 
     return res?.data;
 }
@@ -1015,169 +691,9 @@ async function ensureStitchStateFile() {
     }
 }
 
-async function readJsonFileSafe(filePath, defaultValue) {
-    try {
-        const data = await fsPromises.readFile(filePath, 'utf8');
-        return JSON.parse(data);
-    } catch (err) {
-        if (err.code === 'ENOENT') {
-            return defaultValue;
-        }
-        throw err;
-    }
-}
-
-async function fileExists(filePath) {
-    try {
-        await fsPromises.access(filePath);
-        return true;
-    } catch (_) {
-        return false;
-    }
-}
-
-function formatDuration(seconds) {
-    const hrs = Math.floor(seconds / 3600);
-    const mins = Math.floor((seconds % 3600) / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(
-        2,
-        '0',
-    )}:${String(secs).padStart(2, '0')}`;
-}
-
-function sanitizeFileName(name) {
-    return name.replace(/[^a-z0-9-_]+/gi, '_');
-}
-
-function escapeForFfmpegList(str) {
-    return str.replace(/'/g, "'\\''");
-}
-
-async function appendRunLog(info, cmd, args = []) {
-    const timestamp = new Date().toISOString();
-    const line = [
-        `[${timestamp}]`,
-        info,
-        cmd && cmd !== 'worker-assign' && !cmd.startsWith('worker-')
-            ? `Command: ${cmd} ${args.join(' ')}`
-            : '',
-    ]
-        .filter(Boolean)
-        .join('\n');
-    try {
-        await fsPromises.appendFile(runLogPath, `${line}\n\n`);
-    } catch (err) {
-        console.error(`Failed to write to run log: ${err.message}`);
-    }
-}
-
-async function appendUploadsLog(entry) {
-    try {
-        const existing = await readJsonFileSafe(uploadsLogPath, []);
-        existing.push(entry);
-        await fsPromises.writeFile(
-            uploadsLogPath,
-            JSON.stringify(existing, null, 2),
-        );
-    } catch (err) {
-        console.error(`Failed to write uploads log: ${err.message}`);
-    }
-}
-
-async function buildOverlayText(replay) {
-    const dateText = convertIsoToMmDdYyyyHhMm(replay.date);
-    let p1 = '';
-    let p2 = '';
-    try {
-        const names =
-            replay.players && replay.players.length
-                ? replay.players.map((p, idx) =>
-                      formatOverlayPlayerFromStored(p, replay.codes?.[idx]),
-                  )
-                : await getPlayersForReplay(replay.file_path);
-        p1 = names[0] || '';
-        p2 = names[1] || '';
-    } catch (err) {
-        console.warn(
-            `Failed to read player names for replay #${replay.index}: ${err.message}`,
-        );
-    }
-    return `${dateText} - ${p1} vs ${p2}`;
-}
-
-async function getPlayersForReplay(filePath) {
-    const SlippiGame = await loadSlippiGame();
-    const game = new SlippiGame(filePath);
-    const metadata = game.getMetadata() || {};
-    const players = normalizePlayers(metadata.players);
-    return players.map((p, idx) => formatOverlayPlayer(p, `P${idx + 1}`));
-}
-
-function normalizePlayers(playersObj) {
-    if (!playersObj) return [];
-    if (Array.isArray(playersObj)) return playersObj;
-    const entries = Object.entries(playersObj)
-        .map(([k, v]) => {
-            const num = Number(k);
-            return { idx: Number.isNaN(num) ? k : num, data: v };
-        })
-        .sort((a, b) => {
-            if (typeof a.idx === 'number' && typeof b.idx === 'number') {
-                return a.idx - b.idx;
-            }
-            if (typeof a.idx === 'number') return -1;
-            if (typeof b.idx === 'number') return 1;
-            return String(a.idx).localeCompare(String(b.idx));
-        });
-    return entries.map((e) => e.data);
-}
-
-function formatOverlayPlayer(player, fallback) {
-    if (!player) return '';
-    const names = player.names || {};
-    const tag = names.netplay || '';
-    const code = names.code || '';
-    if (!tag) return '';
-    return code ? `${tag} (${code})` : tag;
-}
-
-function formatOverlayPlayerFromStored(tag, code) {
-    if (!tag) return '';
-    return code ? `${tag} (${code})` : tag;
-}
-
-let cachedSlippiGame = null;
-async function loadSlippiGame() {
-    if (cachedSlippiGame) return cachedSlippiGame;
-    // Prefer CJS require to avoid ESM import issues on some setups
-    const require = createRequire(import.meta.url);
-    try {
-        const SlippiPkg = require('@slippi/slippi-js');
-        const GameCtor =
-            SlippiPkg.SlippiGame ||
-            (SlippiPkg.default && SlippiPkg.default.SlippiGame);
-        if (GameCtor) {
-            cachedSlippiGame = GameCtor;
-            return GameCtor;
-        }
-    } catch (_) {
-        // ignore, fallback to dynamic import
-    }
-    const SlippiPkg = await import('@slippi/slippi-js');
-    const GameCtor =
-        SlippiPkg.SlippiGame ||
-        (SlippiPkg.default && SlippiPkg.default.SlippiGame);
-    if (!GameCtor) {
-        throw new Error('Unable to load SlippiGame from @slippi/slippi-js');
-    }
-    cachedSlippiGame = GameCtor;
-    return GameCtor;
-}
-
 async function fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, totalReplays, onStatus) {
     try {
-        const replay = claimNextReplay(claimTtlMs);
+        const replay = await claimNextReplay(claimTtlMs);
         if (replay) {
             workerStatus.set(workerId, { message: `Replay #${replay.index} - queued`, startTime: Date.now() });
             onStatus?.();
@@ -1189,7 +705,7 @@ async function fetchAndSendNext(workerId, worker, workerStatus, workerTerminatio
             worker.postMessage(replay);
             return;
         }
-        const stats = getStats();
+        const stats = await getStats();
         if (stats.pending > 0) {
             workerStatus.set(workerId, { message: 'Idle - waiting for next eligible replay', startTime: Date.now() });
             onStatus?.();
@@ -1216,7 +732,7 @@ async function fetchAndSendNext(workerId, worker, workerStatus, workerTerminatio
 }
 
 
-function markReplaysField(videoEntries, fieldsToSet) {
+async function markReplaysField(videoEntries, fieldsToSet) {
     const indices = videoEntries.map((v) => v.index);
-    updateFlags(indices, fieldsToSet);
+    await updateFlags(indices, fieldsToSet);
 }
