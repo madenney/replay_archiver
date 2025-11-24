@@ -8,6 +8,7 @@
     "start": "node index.js"
   },
   "dependencies": {
+    "pg": "^8.11.3",
     "better-sqlite3": "^9.4.5",
     "dotenv": "^16.6.1",
     "googleapis": "^166.0.0",
