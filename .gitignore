@@ -5,6 +5,9 @@ creds.txt
 output
 output/*
 
+system_monitor/output
+system_monitor/output/*
+
 node_modules
 
 package-lock.json
