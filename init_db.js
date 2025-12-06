@@ -3,9 +3,13 @@ import fs from 'fs/promises';
 import path from 'path';
 import { createRequire } from 'module';
 import { clearReplays, insertReplayBatch, initSchema } from './db.js';
+import { config } from './config.js';
 
-const replay_directory_path =
-  process.env.REPLAY_DIRECTORY || '/path/to/worker/mount_point/lunar_db/netplay/Hax$';
+if (!config.replayDirectory) {
+  throw new Error('REPLAY_DIRECTORY is required to initialize the database');
+}
+
+const replay_directory_path = path.resolve(config.replayDirectory);
 const ID_WIDTH = 7; // e.g., 0000001
 const LOG_EVERY = Number(process.env.INIT_PROGRESS_EVERY || 1000);
 const SKIP_METADATA =
@@ -71,8 +75,11 @@ async function initDB(dbPathIgnored) {
         console.log(`Found ${slpFilePaths.length} .slp files`);
 
         const withDates = slpFilePaths.map((filePath) => {
+            const relative = path.relative(replay_directory_path, filePath);
+            const storedPath = relative.startsWith('..') ? filePath : relative;
             return {
                 filePath,
+                storedPath,
                 date: parseDateFromFilename(filePath),
             };
         });
@@ -104,7 +111,7 @@ async function initDB(dbPathIgnored) {
                 }
             }
             toInsert.push({
-                file_path: entry.filePath,
+                file_path: entry.storedPath,
                 index,
                 id: padId(index),
                 date: startAt,

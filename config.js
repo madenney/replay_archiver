@@ -21,6 +21,7 @@ const requiredEnvVars = [
   'PGUSER',
   'PGPASSWORD',
   'PGDATABASE',
+  'REPLAY_DIRECTORY',
 ]
 
 const missing = requiredEnvVars.filter((key) => !process.env[key] || process.env[key] === '')
@@ -52,6 +53,8 @@ export const config = {
       : 4 * 60 * 60 * 1000,
   claimTtlMs:
     process.env.CLAIM_TTL_MS !== undefined ? Number(process.env.CLAIM_TTL_MS) : 24 * 60 * 60 * 1000,
-  // Optional: only needed when running init to scan .slp files
-  replayDirectory: process.env.REPLAY_DIRECTORY || null,
+  // Base directory for replay files (set per machine)
+  replayDirectory: process.env.REPLAY_DIRECTORY,
+  // Optional: prefix stored in DB file paths to swap with replayDirectory
+  replayPathPrefix: process.env.REPLAY_PATH_PREFIX || null,
 }
