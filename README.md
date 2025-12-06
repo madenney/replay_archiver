@@ -16,11 +16,14 @@ A small pipeline to turn Slippi Melee replays into rendered videos with a text o
 2. Configure paths:
    - Create a `.env` file in the project root, for example:
      - `OUTPUT_DIR="/path/to/output/dir"`
+     - `REPLAY_DIRECTORY="/path/to/slippi/replays"` (absolute path on this machine)
      - `SSBM_ISO_PATH="/path/to/ssbm/iso"`
      - `DOLPHIN_PATH="/path/to/dolphin/executable"`
+     - (optional) `REPLAY_PATH_PREFIX="/original/db/prefix"` if the `file_path` values in Postgres were written from another machine and need to be rebased to this host
      - (optional) `QUALITY=6`
      - (optional) `BITRATE_KBPS=15000`
      - (optional) `NUM_WORKERS=2`
+     - Postgres connection: `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`
 3. Make sure `overlay.py` can find the font at the path defined in `FONT_PATH`.
 
 ### Usage

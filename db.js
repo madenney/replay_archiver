@@ -1,5 +1,8 @@
+import fs from 'fs'
+import path from 'path'
 import { Pool } from 'pg'
 import os from 'os'
+import { config } from './config.js'
 
 const {
   PGHOST = 'localhost',
@@ -39,6 +42,41 @@ const ALLOWED_UPDATE_FIELDS = new Set([
   'claimed_by',
   'claimed_at',
 ])
+
+function resolveReplayPath(filePath) {
+  if (!filePath) return filePath
+  const normalized = path.normalize(filePath)
+  const replayDir = config.replayDirectory ? path.resolve(config.replayDirectory) : null
+  const prefixToSwap =
+    config.replayPathPrefix && config.replayPathPrefix.length
+      ? path.resolve(config.replayPathPrefix)
+      : null
+
+  // If the path is valid as-is, keep it.
+  if (fs.existsSync(normalized)) return normalized
+
+  // If stored as relative, anchor it to this machine's replay directory.
+  if (replayDir && !path.isAbsolute(normalized)) {
+    const candidate = path.join(replayDir, normalized)
+    if (fs.existsSync(candidate)) return candidate
+  }
+
+  // If a prefix was stored in the DB, swap it for this machine's base.
+  if (replayDir && prefixToSwap && normalized.startsWith(prefixToSwap)) {
+    const candidate = path.join(replayDir, path.relative(prefixToSwap, normalized))
+    if (fs.existsSync(candidate)) return candidate
+  }
+
+  // Fallback: use the filename inside the configured replay directory.
+  if (replayDir) {
+    const candidate = path.join(replayDir, path.basename(normalized))
+    if (fs.existsSync(candidate)) return candidate
+    return candidate
+  }
+
+  // Fall back to the original value.
+  return normalized
+}
 
 export async function initSchema() {
   await pool.query(`
@@ -99,11 +137,12 @@ function toRow(rec) {
 
 function rowToReplay(row) {
   if (!row) return null
+  const resolvedPath = resolveReplayPath(row.file_path)
   return {
     db_id: row.id,
     index: row.idx,
     id: row.ref_id,
-    file_path: row.file_path,
+    file_path: resolvedPath,
     date: row.date,
     players: row.players ? JSON.parse(row.players) : [],
     codes: row.codes ? JSON.parse(row.codes) : [],
