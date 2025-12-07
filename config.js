@@ -33,6 +33,7 @@ export const config = {
   outputDir: process.env.OUTPUT_DIR,
   gamesDir: path.join(process.env.OUTPUT_DIR, 'games'),
   finalDir: path.join(process.env.OUTPUT_DIR, 'final'),
+  keepTempFiles: process.env.KEEP_TEMP_FILES === 'true',
   ssbmIsoPath: process.env.SSBM_ISO_PATH,
   dolphinPath: process.env.DOLPHIN_PATH,
   quality: Number(process.env.QUALITY),

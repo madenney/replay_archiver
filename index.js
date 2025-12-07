@@ -7,14 +7,14 @@ import { record } from './record.js';
 async function main(){
     const args = process.argv.slice(2);
 
-// Regenerate replays.json and exit
-if (args.includes('--init') || args.includes('--create-json')) {
-    await initDB();
-    console.log(`Rebuilt database`);
-    return;
-}
+    // Regenerate replays.json and exit
+    if (args.includes('--init') || args.includes('--create-json')) {
+        await initDB();
+        console.log(`Rebuilt database`);
+        return;
+    }
 
-await record();
+    await record();
 
 }
 
