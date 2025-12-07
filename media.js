@@ -170,6 +170,9 @@ export async function addOverlay(replay, overlayTextBuilder) {
 }
 
 export async function deleteFiles(replay) {
+  if (config.keepTempFiles) {
+    return
+  }
   const fileBasename = pad(replay.index, 6)
   const filesToDelete = [
     `${fileBasename}-unmerged.avi`,
