@@ -33,7 +33,6 @@ const ALLOWED_UPDATE_FIELDS = new Set([
   'codes',
   'game_length_frames',
   'stitch_pending',
-  'video_duration_seconds',
   'recorded',
   'overlaid',
   'stitched',
@@ -89,7 +88,6 @@ export async function initSchema() {
       stitch_pending INTEGER DEFAULT 0,
       stitched INTEGER DEFAULT 0,
       uploaded INTEGER DEFAULT 0,
-      video_duration_seconds REAL,
       skip INTEGER DEFAULT 0,
       claimed_by TEXT,
       claimed_at TEXT,
@@ -124,7 +122,6 @@ function toRow(rec) {
     codes: rec.codes ? JSON.stringify(rec.codes) : null,
     game_length_frames: rec.game_length_frames ?? null,
     stitch_pending: rec.stitch_pending ? 1 : 0,
-    video_duration_seconds: rec.video_duration_seconds ?? null,
     recorded: rec.recorded ? 1 : 0,
     overlaid: rec.overlaid ? 1 : 0,
     stitched: rec.stitched ? 1 : 0,
@@ -148,7 +145,6 @@ function rowToReplay(row) {
     codes: row.codes ? JSON.parse(row.codes) : [],
     game_length_frames: row.game_length_frames,
     stitch_pending: row.stitch_pending,
-    video_duration_seconds: row.video_duration_seconds,
     recorded: !!row.recorded,
     overlaid: !!row.overlaid,
     stitched: !!row.stitched,
@@ -167,8 +163,8 @@ export async function insertReplay(rec) {
   const row = toRow(rec)
   await pool.query(
     `INSERT INTO replays
-    (idx, ref_id, file_path, date, players, codes, game_length_frames, stitch_pending, video_duration_seconds, recorded, overlaid, stitched, uploaded, skip, claimed_by, claimed_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+    (idx, ref_id, file_path, date, players, codes, game_length_frames, stitch_pending, recorded, overlaid, stitched, uploaded, skip, claimed_by, claimed_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
     [
       row.idx,
       row.ref_id,
@@ -178,7 +174,6 @@ export async function insertReplay(rec) {
       row.codes,
       row.game_length_frames,
       row.stitch_pending,
-      row.video_duration_seconds,
       row.recorded,
       row.overlaid,
       row.stitched,
@@ -196,8 +191,8 @@ export async function insertReplayBatch(records) {
     await client.query('BEGIN')
     try {
       const stmt = `INSERT INTO replays
-        (idx, ref_id, file_path, date, players, codes, game_length_frames, stitch_pending, video_duration_seconds, recorded, overlaid, stitched, uploaded, skip, claimed_by, claimed_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+        (idx, ref_id, file_path, date, players, codes, game_length_frames, stitch_pending, recorded, overlaid, stitched, uploaded, skip, claimed_by, claimed_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
         ON CONFLICT (idx) DO NOTHING`
       for (const rec of records) {
         const row = toRow(rec)
@@ -210,7 +205,6 @@ export async function insertReplayBatch(records) {
           row.codes,
           row.game_length_frames,
           row.stitch_pending,
-          row.video_duration_seconds,
           row.recorded,
           row.overlaid,
           row.stitched,
@@ -257,7 +251,7 @@ export async function getStats() {
   }
 }
 
-export async function claimNextReplay(claimTtlMs) {
+export async function claimNextReplay(claimTtlMs, { includeStitchPending = true } = {}) {
   const hostname = os.hostname()
   const cutoff = new Date(Date.now() - claimTtlMs).toISOString()
   const stitchCutoff = new Date(
@@ -268,20 +262,37 @@ export async function claimNextReplay(claimTtlMs) {
   return withClient(async (client) => {
     await client.query('BEGIN')
     try {
-      const res = await client.query(
-        `SELECT * FROM replays
-         WHERE uploaded = 0
-           AND skip = 0
-           AND (stitch_pending = 1 OR recorded = 0 OR overlaid = 0 OR stitched = 0)
-           AND (
-                (stitch_pending = 1 AND (claimed_at IS NULL OR claimed_at < $1))
-                OR (stitch_pending != 1 AND (claimed_at IS NULL OR claimed_at < $2))
-           )
-         ORDER BY idx
-         LIMIT 1
-         FOR UPDATE SKIP LOCKED`,
-        [stitchCutoff, cutoff]
-      )
+      const res = includeStitchPending
+        ? await client.query(
+            `SELECT * FROM replays
+             WHERE uploaded = 0
+               AND skip = 0
+               AND (stitch_pending = 1 OR recorded = 0 OR overlaid = 0 OR stitched = 0)
+               AND (
+                    (stitch_pending = 1 AND (claimed_at IS NULL OR claimed_at < $1))
+                    OR (stitch_pending != 1 AND (claimed_at IS NULL OR claimed_at < $2))
+               )
+             ORDER BY
+               stitch_pending DESC,
+               stitched DESC,
+               overlaid DESC,
+               recorded DESC,
+               idx
+             LIMIT 1
+             FOR UPDATE SKIP LOCKED`,
+            [stitchCutoff, cutoff]
+          )
+        : await client.query(
+            `SELECT * FROM replays
+             WHERE uploaded = 0
+               AND skip = 0
+               AND overlaid = 0
+               AND (claimed_at IS NULL OR claimed_at < $1)
+             ORDER BY recorded DESC, idx
+             LIMIT 1
+             FOR UPDATE SKIP LOCKED`,
+            [cutoff]
+          )
       const row = res.rows[0]
       if (!row) {
         await client.query('COMMIT')
@@ -366,7 +377,6 @@ export async function resetAllFlags() {
          stitched = 0,
          uploaded = 0,
          stitch_pending = 0,
-         video_duration_seconds = NULL,
          claimed_by = NULL,
          claimed_at = NULL`
   )

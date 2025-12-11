@@ -1,6 +1,6 @@
 import fs from 'fs'
 import { promises as fsPromises } from 'fs'
-import { runLogPath } from './paths.js'
+import { runLogPath, uploadsLogPath as defaultUploadsLogPath } from './paths.js'
 
 export async function appendRunLog(info, cmd, args = []) {
   const timestamp = new Date().toISOString();
@@ -35,7 +35,7 @@ export function escapeForFfmpegList(str) {
   return str.replace(/'/g, "'\\''");
 }
 
-export async function appendUploadsLog(entry, uploadsLogPath) {
+export async function appendUploadsLog(entry, uploadsLogPath = defaultUploadsLogPath) {
   try {
     const existing = await readJsonFileSafe(uploadsLogPath, []);
     existing.push(entry);
@@ -65,4 +65,3 @@ export async function fileExists(filePath) {
     return false;
   }
 }
-
