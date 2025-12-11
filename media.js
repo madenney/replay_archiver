@@ -198,14 +198,7 @@ export async function ensureVideoDurationStored(replay, markReplaysField, fileEx
   const fileBasename = pad(replay.index, 6)
   const finalPath = path.resolve(config.gamesDir, `${fileBasename}.avi`)
   if (!(await fileExistsFn(finalPath))) return null
-  if (typeof replay.video_duration_seconds === 'number' && !Number.isNaN(replay.video_duration_seconds)) {
-    return replay.video_duration_seconds
-  }
   const duration = await getVideoDurationFn(finalPath)
-  if (duration != null) {
-    await markReplaysField([replay], { video_duration_seconds: duration })
-    replay.video_duration_seconds = duration
-  }
   return duration
 }
 

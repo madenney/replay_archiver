@@ -29,6 +29,21 @@ if (missing.length) {
   throw new Error(`Missing required env vars: ${missing.join(', ')}`)
 }
 
+function parseNumberEnv(key, defaultValue) {
+  const raw = process.env[key]
+  if ((raw === undefined || raw === null || raw === '') && defaultValue !== undefined) {
+    return defaultValue
+  }
+  const cleaned = String(raw ?? '')
+    .split('#')[0]
+    .trim()
+  const num = Number(cleaned)
+  if (Number.isNaN(num)) {
+    throw new Error(`Invalid number for ${key}: ${raw}`)
+  }
+  return num
+}
+
 export const config = {
   outputDir: process.env.OUTPUT_DIR,
   gamesDir: path.join(process.env.OUTPUT_DIR, 'games'),
@@ -36,24 +51,20 @@ export const config = {
   keepTempFiles: process.env.KEEP_TEMP_FILES === 'true',
   ssbmIsoPath: process.env.SSBM_ISO_PATH,
   dolphinPath: process.env.DOLPHIN_PATH,
-  quality: Number(process.env.QUALITY),
-  bitrateKbps: Number(process.env.BITRATE_KBPS),
-  numWorkers: Number(process.env.NUM_WORKERS),
-  dolphinTimeoutMs: Number(process.env.DOLPHIN_TIMEOUT_MS),
-  ffmpegTimeoutMs: Number(process.env.FFMPEG_TIMEOUT_MS),
-  overlayTimeoutMs: Number(process.env.OVERLAY_TIMEOUT_MS),
-  stitchMinTotalMinutes: Number(process.env.STITCH_MIN_TOTAL_MINUTES),
+  quality: parseNumberEnv('QUALITY'),
+  bitrateKbps: parseNumberEnv('BITRATE_KBPS'),
+  numWorkers: parseNumberEnv('NUM_WORKERS'),
+  dolphinTimeoutMs: parseNumberEnv('DOLPHIN_TIMEOUT_MS'),
+  ffmpegTimeoutMs: parseNumberEnv('FFMPEG_TIMEOUT_MS'),
+  overlayTimeoutMs: parseNumberEnv('OVERLAY_TIMEOUT_MS'),
+  stitchMinTotalMinutes: parseNumberEnv('STITCH_MIN_TOTAL_MINUTES'),
   archiveTitle: process.env.ARCHIVE_TITLE,
   youtubeClientId: process.env.YOUTUBE_CLIENT_ID,
   youtubeClientSecret: process.env.YOUTUBE_CLIENT_SECRET,
   youtubeRefreshToken: process.env.YOUTUBE_REFRESH_TOKEN,
   youtubePrivacy: process.env.YOUTUBE_PRIVACY || 'unlisted',
-  stitchTimeoutMs:
-    process.env.STITCH_TIMEOUT_MS !== undefined
-      ? Number(process.env.STITCH_TIMEOUT_MS)
-      : 4 * 60 * 60 * 1000,
-  claimTtlMs:
-    process.env.CLAIM_TTL_MS !== undefined ? Number(process.env.CLAIM_TTL_MS) : 24 * 60 * 60 * 1000,
+  stitchTimeoutMs: parseNumberEnv('STITCH_TIMEOUT_MS', 4 * 60 * 60 * 1000),
+  claimTtlMs: parseNumberEnv('CLAIM_TTL_MS', 24 * 60 * 60 * 1000),
   // Base directory for replay files (set per machine)
   replayDirectory: process.env.REPLAY_DIRECTORY,
   // Optional: prefix stored in DB file paths to swap with replayDirectory
