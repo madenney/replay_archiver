@@ -7,7 +7,28 @@ from PIL import Image, ImageDraw, ImageFont
 # Path to the font file
 FONT_PATH = '/path/to/replay_archiver/cour_bold.ttf'
 BITRATE_DEFAULT = os.getenv('BITRATE_KBPS', '15000')
-PRESET_DEFAULT = os.getenv('FFMPEG_PRESET', 'fast')
+# Encoding defaults favor quality-per-bit; CRF is capped by maxrate to avoid huge files.
+CRF_DEFAULT = os.getenv('FFMPEG_CRF', '18')
+MAXRATE_DEFAULT = os.getenv('FFMPEG_MAXRATE_KBPS')
+BUFSIZE_DEFAULT = os.getenv('FFMPEG_BUFSIZE_KBPS')
+PRESET_DEFAULT = os.getenv('FFMPEG_PRESET', 'slow')
+PROFILE_DEFAULT = os.getenv('FFMPEG_PROFILE', 'high')
+
+
+def parse_int(value, fallback=None):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def parse_crf(value, fallback=None):
+    if value is None:
+        return fallback
+    normalized = str(value).strip().lower()
+    if normalized in ('', 'none', 'off'):
+        return None
+    return parse_int(value, fallback)
 
 def get_video_dimensions(video_path):
     """Get the width and height of the video using ffprobe."""
@@ -81,11 +102,12 @@ def create_text_overlay(video_path, text, overlay_image_path):
 def overlay_text_on_video(video_path, overlay_image_path, output_video_path):
     """Overlay the PNG image onto the video using FFmpeg."""
     print(f"Overlaying image {overlay_image_path} onto video {video_path}")
-    try:
-        bitrate_kbps = int(BITRATE_DEFAULT)
-    except ValueError:
-        bitrate_kbps = 15000
+    bitrate_kbps = parse_int(BITRATE_DEFAULT, 15000)
+    crf = parse_crf(CRF_DEFAULT, 18)
+    maxrate_kbps = parse_int(MAXRATE_DEFAULT, bitrate_kbps)
+    bufsize_kbps = parse_int(BUFSIZE_DEFAULT, maxrate_kbps * 2 if maxrate_kbps else None)
     preset = PRESET_DEFAULT
+    profile = PROFILE_DEFAULT
     cmd = [
         'ffmpeg',
         '-y',
@@ -95,13 +117,25 @@ def overlay_text_on_video(video_path, overlay_image_path, output_video_path):
         '-filter_complex', '[0:v][1:v]scale2ref[vid][ovr];[vid][ovr]overlay=format=auto:0:0,pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0',
         '-c:v', 'libx264',
         '-preset', preset,
-        '-b:v', f'{bitrate_kbps}k',
-        '-maxrate', f'{bitrate_kbps}k',
-        '-bufsize', f'{bitrate_kbps * 2}k',
+        '-profile:v', profile,
         '-pix_fmt', 'yuv420p',
+    ]
+    if crf is not None:
+        cmd.extend(['-crf', str(crf)])
+        if maxrate_kbps:
+            cmd.extend(['-maxrate', f'{maxrate_kbps}k'])
+        if bufsize_kbps:
+            cmd.extend(['-bufsize', f'{bufsize_kbps}k'])
+    else:
+        cmd.extend([
+            '-b:v', f'{bitrate_kbps}k',
+            '-maxrate', f'{bitrate_kbps}k',
+            '-bufsize', f'{bitrate_kbps * 2}k',
+        ])
+    cmd.extend([
         '-codec:a', 'copy',
         output_video_path
-    ]
+    ])
     print(f"Executing FFmpeg command: {' '.join(cmd)}")
     try:
         result = subprocess.run(

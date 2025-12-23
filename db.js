@@ -313,6 +313,43 @@ export async function claimNextReplay(claimTtlMs, { includeStitchPending = true 
   })
 }
 
+export async function claimReplayByIndex(idx, claimTtlMs) {
+  const hostname = os.hostname()
+  const cutoff = new Date(Date.now() - claimTtlMs).toISOString()
+  const nowIso = new Date().toISOString()
+
+  return withClient(async (client) => {
+    await client.query('BEGIN')
+    try {
+      const res = await client.query(
+        `SELECT * FROM replays
+         WHERE idx = $1
+           AND uploaded = 0
+           AND skip = 0
+           AND (claimed_at IS NULL OR claimed_at < $2)
+         FOR UPDATE SKIP LOCKED`,
+        [idx, cutoff]
+      )
+      const row = res.rows[0]
+      if (!row) {
+        await client.query('COMMIT')
+        return null
+      }
+      await client.query(
+        `UPDATE replays SET claimed_by = $1, claimed_at = $2 WHERE id = $3`,
+        [hostname, nowIso, row.id]
+      )
+      await client.query('COMMIT')
+      row.claimed_by = hostname
+      row.claimed_at = nowIso
+      return rowToReplay(row)
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    }
+  })
+}
+
 export async function updateFlags(ids, fields) {
   if (!ids || ids.length === 0) return
   if (!fields || Object.keys(fields).length === 0) return
@@ -336,11 +373,18 @@ export async function releaseClaim(idx) {
   await pool.query(`UPDATE replays SET claimed_by = NULL, claimed_at = NULL WHERE idx = $1`, [idx])
 }
 
-export async function getReadyForStitch() {
+export async function getReadyForStitch({ onlyIndices = null } = {}) {
+  const params = []
+  let where = 'WHERE skip = 0 AND uploaded = 0 AND overlaid = 1'
+  if (Array.isArray(onlyIndices) && onlyIndices.length > 0) {
+    params.push(onlyIndices)
+    where += ` AND idx = ANY($${params.length})`
+  }
   const { rows } = await pool.query(
     `SELECT * FROM replays
-     WHERE skip = 0 AND uploaded = 0 AND overlaid = 1
-     ORDER BY idx`
+     ${where}
+     ORDER BY idx`,
+    params
   )
   return rows.map(rowToReplay)
 }

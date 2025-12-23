@@ -29,7 +29,7 @@ export async function markReplaysField(videoEntries, fieldsToSet) {
   await updateFlags(indices, fieldsToSet);
 }
 
-export async function maybeStitchAndUpload(replay, sendStatus) {
+export async function maybeStitchAndUpload(replay, sendStatus, { onlyIndices = null } = {}) {
   if (Number.isNaN(stitchMinTotalMinutes) || stitchMinTotalMinutes <= 0) {
     await appendRunLog(
       `Stitch check skipped (stitchMinTotalMinutes=${stitchMinTotalMinutes})`,
@@ -41,7 +41,7 @@ export async function maybeStitchAndUpload(replay, sendStatus) {
   await ensureStitchStateFile();
   const release = await lockfile.lock(stitchStatePath, { retries: 5 });
   try {
-    const ready = await getReadyForStitch();
+    const ready = await getReadyForStitch({ onlyIndices });
 
     await appendRunLog(
       `Stitch check: ${ready.length} ready replays`,
@@ -218,6 +218,7 @@ export async function maybeStitchAndUpload(replay, sendStatus) {
 }
 
 async function stitchVideos(videoEntries, stitchedPath, concatListPath) {
+  const stitchBitrate = Number.isFinite(bitrateKbps) ? bitrateKbps : 15000;
   const listContent = videoEntries
     .map((v) => `file '${escapeForFfmpegList(v.path)}'`)
     .join('\n');
@@ -238,7 +239,7 @@ async function stitchVideos(videoEntries, stitchedPath, concatListPath) {
     '-c:v',
     'copy',
     '-b:v',
-    `${bitrateKbps}k`,
+    `${stitchBitrate}k`,
     '-af',
     'aresample=async=1:first_pts=0',
     '-c:a',

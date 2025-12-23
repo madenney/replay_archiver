@@ -9,8 +9,10 @@ import { pad } from './lib.js';
 import {
   getStats,
   claimNextReplay,
+  claimReplayByIndex,
   getReadyForStitch,
   initSchema,
+  releaseClaim,
 } from './db.js';
 import { config } from './config.js';
 import { appendRunLog, fileExists } from './util_log.js';
@@ -64,32 +66,179 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Main function to process replays with a worker pool
-export async function record(replays) {
+export async function record(options = {}) {
+    const { mode = 'full', includeStitchPending = false, testReplayIndex = null } = options;
+    if (!['full', 'record-only'].includes(mode)) {
+        throw new Error(`Invalid mode: ${mode}. Use 'full' or 'record-only'.`);
+    }
+    const stitchWorkerEnabled = mode === 'full';
+
     console.log('');
     await dbReady;
     await checkHealth();
     await fsPromises.mkdir(gamesDir, { recursive: true });
     await fsPromises.mkdir(finalDir, { recursive: true });
     await printRunStats();
+    if (!stitchWorkerEnabled) {
+        console.log('Mode: record/merge/overlay only (stitch/upload disabled for this run).');
+    }
     // Configure Dolphin settings once before processing replays
     await configureDolphin();
 
+    if (testReplayIndex !== null && testReplayIndex !== undefined) {
+        await processSingleReplay(testReplayIndex, { stitchWorkerEnabled });
+        return;
+    }
+
     // Process replays using a worker pool
-    await processReplaysWithWorkers(numWorkers);
+    await processReplaysWithWorkers(numWorkers, { stitchWorkerEnabled, includeStitchPending });
+}
+
+export async function stitchOnly(options = {}) {
+    const { testReplayIndex = null } = options;
+    console.log('');
+    await dbReady;
+    await checkHealth();
+    await fsPromises.mkdir(gamesDir, { recursive: true });
+    await fsPromises.mkdir(finalDir, { recursive: true });
+    await printRunStats();
+    console.log('Mode: stitch/upload only (no recording/overlay).');
+
+    if (testReplayIndex !== null && testReplayIndex !== undefined) {
+        console.log(`Test mode: stitching/uploading replay #${testReplayIndex} only.`);
+    }
+
+    let didAnyWork = false;
+    while (true) {
+        const stitched = await maybeStitchAndUpload(null, (statusMessage) => {
+            console.log(`Stitcher - ${statusMessage}`);
+        }, testReplayIndex !== null && testReplayIndex !== undefined ? { onlyIndices: [testReplayIndex] } : {});
+        if (!stitched) break;
+        didAnyWork = true;
+    }
+    if (!didAnyWork) {
+        console.log(
+            testReplayIndex !== null && testReplayIndex !== undefined
+                ? 'Stitcher found nothing ready to stitch/upload for the test replay.'
+                : 'Stitcher found nothing ready to stitch/upload.',
+        );
+    } else {
+        console.log(
+            testReplayIndex !== null && testReplayIndex !== undefined
+                ? 'Stitch/upload work completed for the test replay.'
+                : 'Stitch/upload work completed.',
+        );
+    }
+}
+
+async function processSingleReplay(testReplayIndex, { stitchWorkerEnabled } = {}) {
+    const replay = await claimReplayByIndex(testReplayIndex, claimTtlMs);
+    if (!replay) {
+        console.error(
+            `Replay #${testReplayIndex} is not available (missing, claimed, skipped, or already uploaded).`,
+        );
+        return;
+    }
+    console.log(`Test mode: processing replay #${replay.index} only.`);
+    try {
+        await runReplayInWorker(replay, { stitchWorkerEnabled });
+    } catch (error) {
+        console.error(`Replay #${replay.index} failed: ${error.message}`);
+        try {
+            await releaseClaim(replay.index);
+        } catch (_) {
+            // ignore
+        }
+        return;
+    }
+
+    if (!stitchWorkerEnabled) {
+        return;
+    }
+
+    let didAnyWork = false;
+    try {
+        while (true) {
+            const stitched = await maybeStitchAndUpload(null, (statusMessage) => {
+                console.log(`Stitcher - ${statusMessage}`);
+            }, { onlyIndices: [replay.index] });
+            if (!stitched) break;
+            didAnyWork = true;
+        }
+    } catch (error) {
+        console.error(`Stitcher failed for replay #${replay.index}: ${error.message}`);
+        return;
+    }
+    if (!didAnyWork) {
+        console.log('Stitcher found nothing ready to stitch/upload for the test replay.');
+    } else {
+        console.log('Stitch/upload work completed for the test replay.');
+    }
+}
+
+async function runReplayInWorker(replay, { stitchWorkerEnabled } = {}) {
+    const workerId = 'T';
+    const worker = new Worker(__filename, { workerData: { workerId, stitchWorkerEnabled } });
+    let settled = false;
+
+    const finalize = async (err) => {
+        if (settled) return;
+        settled = true;
+        try {
+            await worker.terminate();
+        } catch (_) {
+            // ignore
+        }
+        if (err) {
+            throw err;
+        }
+    };
+
+    return new Promise((resolve, reject) => {
+        const finish = (err) => {
+            finalize(err)
+                .then(() => {
+                    if (err) reject(err);
+                    else resolve();
+                })
+                .catch(reject);
+        };
+
+        worker.on('message', (msg) => {
+            if (!msg) return;
+            if (msg.status === 'update') {
+                console.log(msg.message);
+            } else if (msg.status === 'done') {
+                finish();
+            } else if (msg.status === 'error') {
+                finish(new Error(msg.error || 'Worker error'));
+            }
+        });
+        worker.on('error', (err) => finish(err));
+        worker.on('exit', (code) => {
+            if (settled) return;
+            if (code !== 0) {
+                finish(new Error(`Worker stopped with exit code ${code}`));
+            } else {
+                finish();
+            }
+        });
+        worker.postMessage(replay);
+    });
 }
 
 // Worker pool function to process replays
-async function processReplaysWithWorkers(numWorkers) {
+async function processReplaysWithWorkers(numWorkers, { stitchWorkerEnabled = true, includeStitchPending = false } = {}) {
     const stats = await getStats();
     const totalReplays = stats.total;
     const pendingCount = stats.pending;
     const alreadyUploaded = stats.uploaded;
-    const stitchWorkerEnabled = true; // always keep a single dedicated stitch/upload worker
-    const normalWorkerCount = Math.max(1, Math.max(1, numWorkers) - 1);
-    const normalWorkerClaimOptions = { includeStitchPending: !stitchWorkerEnabled };
+    const workerPoolSize = Math.max(1, numWorkers);
+    const normalWorkerCount = stitchWorkerEnabled ? Math.max(1, workerPoolSize - 1) : workerPoolSize;
+    const normalWorkerClaimOptions = { includeStitchPending };
 
     console.log(
-        `Starting to process ${pendingCount} pending of ${totalReplays} total replays (${alreadyUploaded} already uploaded) with ${normalWorkerCount} normal worker${normalWorkerCount === 1 ? '' : 's'} + 1 stitch/upload worker...`,
+        `Starting to process ${pendingCount} pending of ${totalReplays} total replays (${alreadyUploaded} already uploaded) with ${normalWorkerCount} normal worker${normalWorkerCount === 1 ? '' : 's'}${stitchWorkerEnabled ? ' + 1 stitch/upload worker' : ''}...`,
     );
 
     // Worker pool array and status tracking
@@ -121,7 +270,7 @@ async function processReplaysWithWorkers(numWorkers) {
     function displayWorkerStatuses() {
         console.clear();
         console.log(
-            `Processing ${totalReplays} replays with ${normalWorkerCount} normal worker${normalWorkerCount === 1 ? '' : 's'} + stitch/upload worker...`,
+            `Processing ${totalReplays} replays with ${normalWorkerCount} normal worker${normalWorkerCount === 1 ? '' : 's'}${stitchWorkerEnabled ? ' + stitch/upload worker' : ''}...`,
         );
         console.log(
             `Completed this run: ${completedThisRun}/${pendingCount} | Total uploaded: ${alreadyUploaded + completedThisRun}/${totalReplays}`,

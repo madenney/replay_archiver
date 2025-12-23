@@ -46,9 +46,17 @@ export async function configureDolphin() {
     } else if (line.startsWith('InternalResolutionFrameDumps')) {
       newSettings.push(`InternalResolutionFrameDumps = True`)
     } else if (line.startsWith('BitrateKbps')) {
-      newSettings.push(`BitrateKbps = ${bitrateKbps}`)
+      if (Number.isFinite(bitrateKbps)) {
+        newSettings.push(`BitrateKbps = ${bitrateKbps}`)
+      } else {
+        newSettings.push(line)
+      }
     } else if (line.startsWith('EFBScale')) {
-      newSettings.push(`EFBScale = ${quality}`)
+      if (Number.isFinite(quality)) {
+        newSettings.push(`EFBScale = ${quality}`)
+      } else {
+        newSettings.push(line)
+      }
     } else {
       newSettings.push(line)
     }
@@ -135,8 +143,12 @@ export async function mergeVideo(replay) {
     path.resolve(config.gamesDir, `${fileBasename}-unmerged.avi`),
     '-i',
     path.resolve(config.gamesDir, `${fileBasename}-unmerged.wav`),
-    '-b:v',
-    `${config.bitrateKbps}k`,
+    // keep video untouched; just mux audio so overlay step is the only lossy encode
+    '-c:v',
+    'copy',
+    '-c:a',
+    'pcm_s16le',
+    '-shortest',
     path.resolve(config.gamesDir, `${fileBasename}-merged.avi`),
   ]
 

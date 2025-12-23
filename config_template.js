@@ -7,6 +7,10 @@
 // DOLPHIN_PATH="/path/to/dolphin/executable"
 // QUALITY=6
 // BITRATE_KBPS=15000
+// FFMPEG_CRF=18
+// FFMPEG_MAXRATE_KBPS=15000
+// FFMPEG_BUFSIZE_KBPS=30000
+// FFMPEG_PRESET=slow
 // NUM_WORKERS=2
 // Optional: swap DB prefix to this machine's path
 // REPLAY_PATH_PREFIX="/prefix/stored/in/db"
