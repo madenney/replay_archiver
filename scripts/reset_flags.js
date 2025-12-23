@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { initSchema, resetAllFlags, endPool } from './db.js';
+import { initSchema, resetAllFlags, endPool } from '../db.js';
 
 async function main() {
   await initSchema();
