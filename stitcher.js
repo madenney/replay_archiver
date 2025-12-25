@@ -5,11 +5,14 @@ import lockfile from 'proper-lockfile';
 import { google } from 'googleapis';
 
 import { config } from './config.js';
-import { appendRunLog, appendUploadsLog, formatDuration, sanitizeFileName, escapeForFfmpegList, fileExists } from './util_log.js';
+import { appendRunLog, appendUploadsLog, sanitizeFileName, escapeForFfmpegList, fileExists } from './util_log.js';
 import { stitchStatePath } from './paths.js';
 import { spawnProcess, runChildProcess } from './childProc.js';
 import { getReadyForStitch, getBlockers, updateFlags } from './db.js';
 import { pad, convertIsoToMmDdYyyyHhMm } from './lib.js';
+import { buildYouTubeDescription } from './youtube_description.js';
+
+const LEAD_IN_FRAMES = 123;
 
 const {
   gamesDir,
@@ -71,13 +74,14 @@ export async function maybeStitchAndUpload(replay, sendStatus, { onlyIndices = n
         invalidFrameCounts.push({ index: r.index, frames });
         break;
       }
-      const duration = frames / 60; // Slippi frames are 60fps
+      const duration = (frames + LEAD_IN_FRAMES) / 60; // Slippi frames are 60fps
       videoEntries.push({
         index: r.index,
         path: videoPath,
         duration,
         date: r.date,
         frames,
+        replay: r,
       });
       totalSeconds += duration;
       maxReadyIndex = r.index;
@@ -126,15 +130,18 @@ export async function maybeStitchAndUpload(replay, sendStatus, { onlyIndices = n
     const safeStart = startDate.replace(/[\/:]/g, '-');
     const safeEnd = endDate.replace(/[\/:]/g, '-');
     const archiveTitleSafe = archiveTitle || 'Archive';
-    const finalTitle = `${archiveTitleSafe}: ${startDate} - ${endDate}`;
-    const stitchedFileName = `${sanitizeFileName(archiveTitleSafe)}_${safeStart}_${safeEnd}.avi`;
+    const startDateOnly = startDate ? startDate.split(' ')[0] : '';
+    const endDateOnly = endDate ? endDate.split(' ')[0] : '';
+    const finalTitle = `${archiveTitleSafe}: ${startDateOnly} - ${endDateOnly}`;
+    const stitchedFileName = `${sanitizeFileName(archiveTitleSafe)}_${safeStart}_${safeEnd}.mkv`;
     const stitchedPath = path.join(finalDir, stitchedFileName);
     const concatListPath = path.join(finalDir, `concat_${Date.now()}.txt`);
     const description = buildYouTubeDescription({
       archiveTitle: archiveTitleSafe,
       startDate,
       endDate,
-      videoEntries,
+      indices: videoEntries.map((v) => v.index),
+      durationsSeconds: videoEntries.map((v) => v.duration),
       totalSeconds,
     });
 
@@ -150,7 +157,15 @@ export async function maybeStitchAndUpload(replay, sendStatus, { onlyIndices = n
       stitchedPath,
       startDate,
       endDate,
-      indices: videoEntries.map((v) => v.index),
+      games: videoEntries.map((v) => ({
+        index: v.replay.index,
+        file_path: v.replay.file_path,
+        video_path: v.path,
+        date: v.replay.date,
+        players: v.replay.players,
+        codes: v.replay.codes,
+        game_length_frames: v.replay.game_length_frames,
+      })),
       totalSeconds,
       videoId: null,
     };
@@ -166,6 +181,11 @@ export async function maybeStitchAndUpload(replay, sendStatus, { onlyIndices = n
         filePath: stitchedPath,
         title: finalTitle,
         description,
+        onProgress: ({ bytesRead, totalBytes }) => {
+          if (!totalBytes || !Number.isFinite(totalBytes)) return;
+          const percent = Math.min(100, Math.floor((bytesRead / totalBytes) * 100));
+          sendStatus?.(`Uploading to YouTube (${percent}%)`);
+        },
       });
     } catch (err) {
       console.error(`YouTube upload failed: ${err.message}`);
@@ -230,6 +250,8 @@ async function stitchVideos(videoEntries, stitchedPath, concatListPath) {
 
   const args = [
     '-y',
+    '-fflags',
+    '+genpts',
     '-f',
     'concat',
     '-safe',
@@ -246,8 +268,6 @@ async function stitchVideos(videoEntries, stitchedPath, concatListPath) {
     'aac',
     '-b:a',
     '128k',
-    '-fflags',
-    '+genpts',
     stitchedPath,
   ];
 
@@ -294,26 +314,7 @@ function getDateRange(videoEntries) {
   };
 }
 
-function buildYouTubeDescription({
-  archiveTitle,
-  startDate,
-  endDate,
-  videoEntries,
-  totalSeconds,
-}) {
-  const lines = [
-    `${archiveTitle}: ${startDate} - ${endDate}`,
-    `Games: ${videoEntries.length}`,
-    `Total duration: ${formatDuration(totalSeconds)}`,
-    `Range: ${startDate} to ${endDate}`,
-    '',
-    'Games in this archive (indices):',
-    videoEntries.map((v) => v.index).join(', '),
-  ];
-  return lines.join('\n');
-}
-
-async function uploadToYouTube({ filePath, title, description }) {
+async function uploadToYouTube({ filePath, title, description, onProgress }) {
   const oauth2Client = new google.auth.OAuth2(
     youtubeClientId,
     youtubeClientSecret,
@@ -325,6 +326,9 @@ async function uploadToYouTube({ filePath, title, description }) {
     version: 'v3',
     auth: oauth2Client,
   });
+  const totalBytes = (await fsPromises.stat(filePath)).size;
+  let lastPercent = -1;
+  let lastUpdateAt = 0;
   const res = await youtube.videos.insert(
     {
       part: ['snippet', 'status'],
@@ -342,8 +346,14 @@ async function uploadToYouTube({ filePath, title, description }) {
       },
     },
     {
-      onUploadProgress: () => {
-        // optional: could log progress
+      onUploadProgress: (event) => {
+        if (!event || typeof event.bytesRead !== 'number') return;
+        const percent = Math.min(100, Math.floor((event.bytesRead / totalBytes) * 100));
+        const now = Date.now();
+        if (percent === lastPercent && now - lastUpdateAt < 1000) return;
+        lastPercent = percent;
+        lastUpdateAt = now;
+        onProgress?.({ bytesRead: event.bytesRead, totalBytes });
       },
       onUploadError: (err) => {
         throw err;

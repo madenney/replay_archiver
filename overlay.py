@@ -76,19 +76,20 @@ def create_text_overlay(video_path, text, overlay_image_path):
         text_width, text_height = textsize(text, font=font)
 
         # Position text at the bottom left with a small margin
-        x, y = 7, height - text_height - 5
+        x, base_y = 7, height - text_height - 5
+        text_y = base_y - 1
 
         # Define the background rectangle for the text (with padding)
         rect_x0 = x - 10
-        rect_y0 = y - 12
+        rect_y0 = base_y - 9
         rect_x1 = x + text_width + 6
-        rect_y1 = y + text_height + 5
+        rect_y1 = base_y + text_height + 5
 
         # Draw a semi-transparent black rounded rectangle behind the text
         d.rounded_rectangle([rect_x0, rect_y0, rect_x1, rect_y1], fill="#202020", radius=2)
 
         # Add the text over the rectangle
-        d.text((x, y), text, font=font, fill=(255, 255, 255, 255))
+        d.text((x, text_y), text, font=font, fill=(255, 255, 255, 255))
 
         # Save the overlay image to the specified path
         img.save(overlay_image_path)
