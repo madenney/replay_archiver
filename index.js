@@ -30,6 +30,7 @@ async function main(){
     const args = process.argv.slice(2);
     const stitchOnlyFlag = args.includes('-s') || args.includes('--stitch-only');
     const recordOnlyFlag = args.includes('-r') || args.includes('--record-only');
+    const clearFlag = args.includes('-c') || args.includes('--clear');
     const testReplayIndex = parseTestReplayIndex(args);
 
     if (stitchOnlyFlag && recordOnlyFlag) {
@@ -50,12 +51,12 @@ async function main(){
     }
 
     if (stitchOnlyFlag) {
-        await stitchOnly({ testReplayIndex });
+        await stitchOnly({ testReplayIndex, clearUnfinished: clearFlag });
         return;
     }
 
     const mode = recordOnlyFlag ? 'record-only' : 'full';
-    await record({ mode, testReplayIndex });
+    await record({ mode, testReplayIndex, clearUnfinished: clearFlag });
 
 }
 
