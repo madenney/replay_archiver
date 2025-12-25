@@ -40,6 +40,7 @@ A small pipeline to turn Slippi Melee replays into rendered videos with a text o
    - `node index.js`
    - The script loads `replays.json`, filters out entries with `done: true`, and processes the rest.
    - Test a single replay by index: `node index.js -t 123` (optional `-r` or `-s`)
+   - Clear unfinished replays/files on startup: `node index.js -c` (optional with `-r` or `-s`)
    - Stitch/upload only: `npm start -- -s` (or `node index.js -s`)
    - Record/merge/overlay only (no stitch/upload this run): `npm start -- -r` (or `node index.js -r`)
 3. Resuming:

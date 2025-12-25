@@ -11,6 +11,7 @@ import {
   claimNextReplay,
   claimReplayByIndex,
   getReadyForStitch,
+  getVideoEntries,
   initSchema,
   releaseClaim,
 } from './db.js';
@@ -61,13 +62,76 @@ async function printRunStats() {
     console.log('=====================');
 }
 
+function getReplayArtifactPaths(replay, { includeFinal = true } = {}) {
+    const fileBasename = pad(replay.index, 6);
+    const files = [
+        `${fileBasename}-unmerged.avi`,
+        `${fileBasename}-unmerged.wav`,
+        `${fileBasename}-merged.avi`,
+        `${fileBasename}-overlay.png`,
+        `${fileBasename}.json`,
+    ];
+    if (includeFinal) {
+        files.push(`${fileBasename}.avi`);
+    }
+    return files.map((file) => path.resolve(gamesDir, file));
+}
+
+async function deleteReplayArtifacts(replay, files = null) {
+    const targets = Array.isArray(files) ? files : getReplayArtifactPaths(replay);
+    for (const filePath of targets) {
+        try {
+            await fsPromises.unlink(filePath);
+            console.log(`Clear: deleted ${filePath}`);
+        } catch (error) {
+            if (error.code !== 'ENOENT') {
+                console.error(`Failed to delete ${filePath}: ${error.message}`);
+            }
+        }
+    }
+}
+
+async function clearUnfinishedReplays() {
+    console.log('Clear: loading replay list...');
+    const allReplays = await getVideoEntries();
+    console.log(`Clear: loaded ${allReplays.length} replays. Selecting incomplete pre-stitch rows...`);
+    const candidates = allReplays.filter(
+        (replay) => !replay.skip && (!replay.recorded || !replay.overlaid),
+    );
+    console.log(`Clear: found ${candidates.length} replay(s) to reset.`);
+    if (candidates.length === 0) {
+        console.log('Clear: no unfinished replays to reset.');
+        return;
+    }
+    for (const replay of candidates) {
+        console.log(
+            `Clear: replay #${replay.index} recorded=${replay.recorded} overlaid=${replay.overlaid} -> reset`,
+        );
+        await deleteReplayArtifacts(replay);
+    }
+    await markReplaysField(
+        candidates,
+        {
+        recorded: 0,
+        overlaid: 0,
+        stitched: 0,
+        uploaded: 0,
+        stitch_pending: 0,
+        claimed_by: null,
+        claimed_at: null,
+        },
+    );
+    await appendRunLog(`Clear reset ${candidates.length} unfinished replays`, 'clear', []);
+    console.log('Clear: done.');
+}
+
 // Define __filename and __dirname for ESM
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Main function to process replays with a worker pool
 export async function record(options = {}) {
-    const { mode = 'full', includeStitchPending = false, testReplayIndex = null } = options;
+    const { mode = 'full', includeStitchPending = false, testReplayIndex = null, clearUnfinished = false } = options;
     if (!['full', 'record-only'].includes(mode)) {
         throw new Error(`Invalid mode: ${mode}. Use 'full' or 'record-only'.`);
     }
@@ -75,6 +139,10 @@ export async function record(options = {}) {
 
     console.log('');
     await dbReady;
+    if (clearUnfinished) {
+        console.log('Clear mode: scanning for unfinished replays before starting.');
+        await clearUnfinishedReplays();
+    }
     await checkHealth();
     await fsPromises.mkdir(gamesDir, { recursive: true });
     await fsPromises.mkdir(finalDir, { recursive: true });
@@ -95,9 +163,13 @@ export async function record(options = {}) {
 }
 
 export async function stitchOnly(options = {}) {
-    const { testReplayIndex = null } = options;
+    const { testReplayIndex = null, clearUnfinished = false } = options;
     console.log('');
     await dbReady;
+    if (clearUnfinished) {
+        console.log('Clear mode: scanning for unfinished replays before starting.');
+        await clearUnfinishedReplays();
+    }
     await checkHealth();
     await fsPromises.mkdir(gamesDir, { recursive: true });
     await fsPromises.mkdir(finalDir, { recursive: true });
@@ -614,6 +686,20 @@ if (!isMainThread) {
                     replay.stitch_pending = 1;
                     await finishReplay(replay, 'overlaid - deferred to stitch worker');
                     return;
+                }
+
+                if (!replay.overlaid) {
+                    const finalVideoPath = path.resolve(gamesDir, `${pad(replay.index, 6)}.avi`);
+                    if (await fileExists(finalVideoPath)) {
+                        sendStatus('Final video exists; updating flags');
+                        await markReplaysField([replay], { recorded: true, overlaid: true, stitch_pending: 1 });
+                        replay.recorded = true;
+                        replay.overlaid = true;
+                        replay.stitch_pending = 1;
+                        sendStatus('Handing to stitch/upload worker');
+                        await finishReplay(replay, 'final video already exists - flags updated');
+                        return;
+                    }
                 }
 
                 if (replay.recorded && !replay.overlaid) {
