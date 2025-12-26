@@ -2,6 +2,7 @@ import 'dotenv/config';
 import path from 'path';
 import { promises as fsPromises } from 'fs';
 import os from 'os';
+import readline from 'readline';
 import { Worker, isMainThread, parentPort, workerData } from 'worker_threads';
 import { fileURLToPath } from 'url';
 
@@ -307,7 +308,6 @@ async function processReplaysWithWorkers(numWorkers, { stitchWorkerEnabled = tru
     const alreadyUploaded = stats.uploaded;
     const workerPoolSize = Math.max(1, numWorkers);
     const normalWorkerCount = stitchWorkerEnabled ? Math.max(1, workerPoolSize - 1) : workerPoolSize;
-    const normalWorkerClaimOptions = { includeStitchPending };
 
     console.log(
         `Starting to process ${pendingCount} pending of ${totalReplays} total replays (${alreadyUploaded} already uploaded) with ${normalWorkerCount} normal worker${normalWorkerCount === 1 ? '' : 's'}${stitchWorkerEnabled ? ' + 1 stitch/upload worker' : ''}...`,
@@ -315,9 +315,11 @@ async function processReplaysWithWorkers(numWorkers, { stitchWorkerEnabled = tru
 
     // Worker pool array and status tracking
     const workers = [];
+    const workersById = new Map();
     const workerPromises = [];
     const workerStatus = new Map(); // Map to track worker status and start time
     const workerTerminationFlags = new Map();
+    const workerBusy = new Map();
     let completedThisRun = 0;
     let statusInterval;
     const STITCH_WORKER_ID = 'S';
@@ -328,6 +330,13 @@ async function processReplaysWithWorkers(numWorkers, { stitchWorkerEnabled = tru
     let stitchWorkerRunRejector = null;
     let stitchWorkerRunPromise = null;
     let stitchCheckInFlight = false;
+    let stitchWorkerTerminationRequested = false;
+    const shutdownState = { requested: false, requestedAt: null, reason: null };
+    let shutdownHandlersInstalled = false;
+    let keypressHandler = null;
+    let stdinWasRaw = false;
+    let stdinResumed = false;
+    const normalWorkerClaimOptions = { includeStitchPending, shutdownState };
 
     // Helper function to format elapsed time as mm:ss
     function formatElapsedTime(startTime) {
@@ -347,6 +356,13 @@ async function processReplaysWithWorkers(numWorkers, { stitchWorkerEnabled = tru
         console.log(
             `Completed this run: ${completedThisRun}/${pendingCount} | Total uploaded: ${alreadyUploaded + completedThisRun}/${totalReplays}`,
         );
+        if (shutdownState.requested && shutdownState.requestedAt) {
+            const elapsedTime = formatElapsedTime(shutdownState.requestedAt);
+            console.log(
+                `Shutdown requested${shutdownState.reason ? ` (${shutdownState.reason})` : ''}; draining workers... [${elapsedTime}]`,
+            );
+        }
+        console.log('Controls: press q or Ctrl+C to stop after current jobs; press Ctrl+C again to force exit.');
         console.log('\nWorker Statuses:');
         workerStatus.forEach((statusObj, workerId) => {
             const elapsedTime = formatElapsedTime(statusObj.startTime);
@@ -355,11 +371,125 @@ async function processReplaysWithWorkers(numWorkers, { stitchWorkerEnabled = tru
         console.log('');
     }
 
+    function requestShutdown(reason) {
+        if (shutdownState.requested) {
+            console.log('Shutdown already requested. Press Ctrl+C again to force exit.');
+            return;
+        }
+        shutdownState.requested = true;
+        shutdownState.requestedAt = Date.now();
+        shutdownState.reason = reason || null;
+        console.log(
+            `Graceful shutdown requested${reason ? ` (${reason})` : ''}. Workers will finish current jobs and then stop.`,
+        );
+        workerTerminationFlags.forEach((flag) => {
+            flag.value = true;
+        });
+        workersById.forEach((worker, workerId) => {
+            const busy = workerBusy.get(workerId);
+            if (!busy) {
+                workerStatus.set(workerId, { message: 'Idle - shutdown requested', startTime: Date.now() });
+                void worker.terminate();
+            }
+        });
+        if (stitchWorker && !stitchWorkerBusy) {
+            workerStatus.set(STITCH_WORKER_ID, { message: 'Stitcher idle - shutdown requested', startTime: Date.now() });
+            stitchWorkerTerminationRequested = true;
+            void stitchWorker.terminate();
+        }
+        displayWorkerStatuses();
+    }
+
+    function cleanupShutdownHandlers() {
+        if (keypressHandler && process.stdin.isTTY) {
+            process.stdin.off('keypress', keypressHandler);
+            keypressHandler = null;
+        }
+        if (process.stdin.isTTY) {
+            if (stdinWasRaw) {
+                try {
+                    process.stdin.setRawMode(false);
+                } catch (_) {
+                    // ignore
+                }
+                stdinWasRaw = false;
+            }
+            if (stdinResumed) {
+                process.stdin.pause();
+                stdinResumed = false;
+            }
+        }
+    }
+
+    function handleCtrlC(source) {
+        if (!shutdownState.requested) {
+            requestShutdown(source);
+            return;
+        }
+        console.log('Force exit requested (second Ctrl+C).');
+        process.exit(130);
+    }
+
+    function installShutdownHandlers() {
+        if (shutdownHandlersInstalled) return;
+        shutdownHandlersInstalled = true;
+        process.on('SIGINT', () => {
+            handleCtrlC('SIGINT');
+        });
+        process.on('SIGTERM', () => {
+            requestShutdown('SIGTERM');
+        });
+
+        if (process.stdin.isTTY) {
+            readline.emitKeypressEvents(process.stdin);
+            try {
+                process.stdin.setRawMode(true);
+                stdinWasRaw = true;
+                process.stdin.resume();
+                stdinResumed = true;
+            } catch (_) {
+                // ignore
+            }
+            keypressHandler = (_str, key) => {
+                if (!key) return;
+                if (key.ctrl && key.name === 'c') {
+                    handleCtrlC('Ctrl+C');
+                    return;
+                }
+                if (key.name === 'q' && !key.ctrl && !key.meta) {
+                    requestShutdown('keypress q');
+                }
+            };
+            process.stdin.on('keypress', keypressHandler);
+            process.on('exit', () => {
+                cleanupShutdownHandlers();
+            });
+        }
+    }
+
     function createStitchWorker() {
         const worker = new Worker(__filename, { workerData: { workerId: STITCH_WORKER_ID, role: 'stitcher' } });
         workerStatus.set(STITCH_WORKER_ID, { message: 'Idle (stitch/upload)', startTime: Date.now() });
 
         stitchWorkerPromise = new Promise((resolve, reject) => {
+            let stitchWorkerPromiseSettled = false;
+            const settleStitchWorker = (err) => {
+                if (stitchWorkerPromiseSettled) return;
+                stitchWorkerPromiseSettled = true;
+                workerStatus.delete(STITCH_WORKER_ID);
+                stitchWorkerBusy = false;
+                const shutdownRequested = shutdownState.requested || stitchWorkerTerminationRequested;
+                if (err && !shutdownRequested) {
+                    if (stitchWorkerRunRejector) stitchWorkerRunRejector(err);
+                    reject(err);
+                } else {
+                    resolve();
+                }
+                stitchWorkerRunResolver = null;
+                stitchWorkerRunRejector = null;
+                stitchWorkerRunPromise = null;
+            };
+
             worker.on('message', (msg) => {
                 if (msg.status === 'stitch-update') {
                     workerStatus.set(STITCH_WORKER_ID, { message: `Stitcher - ${msg.message}`, startTime: Date.now() });
@@ -371,6 +501,11 @@ async function processReplaysWithWorkers(numWorkers, { stitchWorkerEnabled = tru
                         startTime: Date.now(),
                     });
                     displayWorkerStatuses();
+                    if (shutdownState.requested && stitchWorker) {
+                        workerStatus.set(STITCH_WORKER_ID, { message: 'Stitcher stopped (shutdown requested)', startTime: Date.now() });
+                        stitchWorkerTerminationRequested = true;
+                        void stitchWorker.terminate();
+                    }
                     stitchWorkerRunResolver?.(msg.didWork);
                     stitchWorkerRunResolver = null;
                     stitchWorkerRunRejector = null;
@@ -393,32 +528,30 @@ async function processReplaysWithWorkers(numWorkers, { stitchWorkerEnabled = tru
                 }
             });
             worker.on('error', (err) => {
+                const shutdownRequested = shutdownState.requested || stitchWorkerTerminationRequested;
+                if (shutdownRequested) {
+                    settleStitchWorker();
+                    return;
+                }
                 stitchWorkerBusy = false;
-                if (stitchWorkerRunRejector) stitchWorkerRunRejector(err);
-                reject(err);
-                stitchWorkerRunResolver = null;
-                stitchWorkerRunRejector = null;
-                stitchWorkerRunPromise = null;
+                settleStitchWorker(err);
             });
             worker.on('exit', (code) => {
-                workerStatus.delete(STITCH_WORKER_ID);
-                stitchWorkerBusy = false;
-                if (code !== 0) {
-                    const err = new Error(`Stitch worker stopped with exit code ${code}`);
-                    if (stitchWorkerRunRejector) stitchWorkerRunRejector(err);
-                    reject(err);
-                } else {
-                    resolve();
+                const shutdownRequested = shutdownState.requested || stitchWorkerTerminationRequested;
+                if (code !== 0 && !shutdownRequested) {
+                    settleStitchWorker(new Error(`Stitch worker stopped with exit code ${code}`));
+                    return;
                 }
-                stitchWorkerRunResolver = null;
-                stitchWorkerRunRejector = null;
-                stitchWorkerRunPromise = null;
+                settleStitchWorker();
             });
         });
         return worker;
     }
 
     async function triggerStitchWorker(reason) {
+        if (shutdownState.requested) {
+            return null;
+        }
         if (!stitchWorkerEnabled || stitchWorkerBusy || stitchCheckInFlight) {
             return null;
         }
@@ -458,6 +591,8 @@ async function processReplaysWithWorkers(numWorkers, { stitchWorkerEnabled = tru
         const worker = new Worker(__filename, { workerData: { workerId, stitchWorkerEnabled } });
         workerStatus.set(workerId, { message: 'Idle', startTime: Date.now() });
         workerTerminationFlags.set(workerId, { value: false });
+        workerBusy.set(workerId, false);
+        workersById.set(workerId, worker);
 
         const workerPromise = new Promise((resolve, reject) => {
             worker.on('message', (msg) => {
@@ -466,12 +601,19 @@ async function processReplaysWithWorkers(numWorkers, { stitchWorkerEnabled = tru
                     workerStatus.set(workerId, { message: msg.message, startTime: Date.now() });
                     displayWorkerStatuses();
                 } else if (msg.status === 'done') {
+                    workerBusy.set(workerId, false);
                     workerStatus.set(workerId, { message: 'Idle - requesting next', startTime: Date.now() });
                     completedThisRun++;
                     console.log(
                         `Completed this run: ${completedThisRun}/${pendingCount} (overall ${alreadyUploaded + completedThisRun}/${totalReplays})`,
                     );
-                    void fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, () => {
+                    if (shutdownState.requested) {
+                        workerStatus.set(workerId, { message: 'Idle - shutdown requested', startTime: Date.now() });
+                        displayWorkerStatuses();
+                        void worker.terminate();
+                        return;
+                    }
+                    void fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, workerBusy, () => {
                         displayWorkerStatuses();
                     }, normalWorkerClaimOptions);
                     if (stitchWorkerEnabled) {
@@ -479,12 +621,19 @@ async function processReplaysWithWorkers(numWorkers, { stitchWorkerEnabled = tru
                     }
                 } else if (msg.status === 'error') {
                     console.error(`Worker ${workerId} error: ${msg.error}`);
+                    workerBusy.set(workerId, false);
                     workerStatus.set(workerId, { message: 'Idle - retry after error', startTime: Date.now() });
                     completedThisRun++;
                     console.log(
                         `Finished with error this run: ${completedThisRun}/${pendingCount} (overall ${alreadyUploaded + completedThisRun}/${totalReplays})`,
                     );
-                    void fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, () => {
+                    if (shutdownState.requested) {
+                        workerStatus.set(workerId, { message: 'Idle - shutdown requested', startTime: Date.now() });
+                        displayWorkerStatuses();
+                        void worker.terminate();
+                        return;
+                    }
+                    void fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, workerBusy, () => {
                         displayWorkerStatuses();
                     }, normalWorkerClaimOptions);
                     if (stitchWorkerEnabled) {
@@ -499,6 +648,8 @@ async function processReplaysWithWorkers(numWorkers, { stitchWorkerEnabled = tru
                     reject(new Error(`Worker ${workerId} stopped with exit code ${code}`));
                 } else {
                     workerStatus.delete(workerId);
+                    workerBusy.delete(workerId);
+                    workersById.delete(workerId);
                     resolve();
                 }
             });
@@ -515,10 +666,11 @@ async function processReplaysWithWorkers(numWorkers, { stitchWorkerEnabled = tru
         console.log('No pending replays to process.');
         return;
     }
+    installShutdownHandlers();
     for (let i = 0; i < workersToStart; i++) {
         const workerId = i + 1; // Assign a unique ID to each worker
         const worker = createWorker(workerId);
-        void fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, () => {
+        void fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, workerBusy, () => {
             displayWorkerStatuses();
         }, normalWorkerClaimOptions);
     }
@@ -546,6 +698,7 @@ async function processReplaysWithWorkers(numWorkers, { stitchWorkerEnabled = tru
     if (statusInterval) {
         clearInterval(statusInterval);
     }
+    cleanupShutdownHandlers();
     console.clear();
     console.log('All replays processed.');
 }
@@ -759,17 +912,32 @@ if (!isMainThread) {
     }
 }
 
-async function fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, onStatus, options = {}) {
-    const { includeStitchPending = true } = options;
+async function fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, workerBusy, onStatus, options = {}) {
+    const { includeStitchPending = true, shutdownState = null } = options;
     const shouldStop = () =>
-        workerTerminationFlags.get(workerId)?.value || !worker || worker.threadId === undefined;
+        (shutdownState && shutdownState.requested) ||
+        workerTerminationFlags.get(workerId)?.value ||
+        !worker ||
+        worker.threadId === undefined;
 
     if (shouldStop()) {
+        if (shutdownState?.requested) {
+            workerStatus.set(workerId, { message: 'Idle - shutdown requested', startTime: Date.now() });
+            onStatus?.();
+        }
         return;
     }
 
     try {
         const replay = await claimNextReplay(claimTtlMs, { includeStitchPending });
+        if (shutdownState?.requested) {
+            if (replay) {
+                await releaseClaim(replay.index);
+            }
+            workerStatus.set(workerId, { message: 'Idle - shutdown requested', startTime: Date.now() });
+            onStatus?.();
+            return;
+        }
         if (replay) {
             workerStatus.set(workerId, { message: `Replay #${replay.index} - queued`, startTime: Date.now() });
             onStatus?.();
@@ -779,7 +947,11 @@ async function fetchAndSendNext(workerId, worker, workerStatus, workerTerminatio
                 [],
             );
             if (shouldStop()) {
+                await releaseClaim(replay.index);
                 return;
+            }
+            if (workerBusy) {
+                workerBusy.set(workerId, true);
             }
             worker.postMessage(replay);
             return;
@@ -793,17 +965,21 @@ async function fetchAndSendNext(workerId, worker, workerStatus, workerTerminatio
                 startTime: Date.now(),
             });
             onStatus?.();
-            setTimeout(() => {
-                if (shouldStop()) return;
-                fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, onStatus, options);
-            }, 2000);
+            if (!shutdownState?.requested) {
+                setTimeout(() => {
+                    if (shouldStop()) return;
+                    fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, workerBusy, onStatus, options);
+                }, 2000);
+            }
         } else {
             workerStatus.set(workerId, { message: 'Idle - no pending replays (will retry)', startTime: Date.now() });
             onStatus?.();
-            setTimeout(() => {
-                if (shouldStop()) return;
-                fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, onStatus, options);
-            }, 5000);
+            if (!shutdownState?.requested) {
+                setTimeout(() => {
+                    if (shouldStop()) return;
+                    fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, workerBusy, onStatus, options);
+                }, 5000);
+            }
         }
     } catch (err) {
         console.error(`Worker ${workerId} failed to claim next replay: ${err.message}`);
@@ -811,9 +987,11 @@ async function fetchAndSendNext(workerId, worker, workerStatus, workerTerminatio
         onStatus?.();
         const flag = workerTerminationFlags.get(workerId);
         if (flag) flag.value = true;
-        setTimeout(() => {
-            if (shouldStop()) return;
-            fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, onStatus, options);
-        }, 5000);
+        if (!shutdownState?.requested) {
+            setTimeout(() => {
+                if (shouldStop()) return;
+                fetchAndSendNext(workerId, worker, workerStatus, workerTerminationFlags, workerBusy, onStatus, options);
+            }, 5000);
+        }
     }
 }
