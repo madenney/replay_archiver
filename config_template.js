@@ -12,6 +12,7 @@
 // FFMPEG_BUFSIZE_KBPS=30000
 // FFMPEG_PRESET=slow
 // NUM_WORKERS=2
+// SLIPPI_UPDATE=7950
 // Optional: swap DB prefix to this machine's path
 // REPLAY_PATH_PREFIX="/prefix/stored/in/db"
 

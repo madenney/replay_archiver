@@ -219,10 +219,18 @@ export async function buildOverlayText(replay) {
   let p1 = ''
   let p2 = ''
   try {
-    const names =
+    const playerInfo =
       replay.players && replay.players.length
-        ? replay.players.map((p, idx) => formatOverlayPlayerFromStored(p, replay.codes?.[idx]))
+        ? replay.players.map((tag, idx) => ({ tag, code: replay.codes?.[idx] || '' }))
         : await getPlayersForReplay(replay.file_path)
+    const haxColor = await getHaxFoxColor(replay, playerInfo)
+    if (haxColor && playerInfo[haxColor.index]) {
+      playerInfo[haxColor.index] = {
+        ...playerInfo[haxColor.index],
+        code: `${haxColor.code} - ${haxColor.color}`,
+      }
+    }
+    const names = playerInfo.map((p) => formatOverlayPlayerFromStored(p.tag, p.code))
     p1 = names[0] || ''
     p2 = names[1] || ''
   } catch (err) {
@@ -236,7 +244,10 @@ async function getPlayersForReplay(filePath) {
   const game = new SlippiGame(filePath)
   const metadata = game.getMetadata() || {}
   const players = normalizePlayers(metadata.players)
-  return players.map((p, idx) => formatOverlayPlayer(p, `P${idx + 1}`))
+  return players.map((p, idx) => ({
+    tag: extractPlayerTag(p, `P${idx + 1}`),
+    code: extractPlayerCode(p),
+  }))
 }
 
 function normalizePlayers(playersObj) {
@@ -272,7 +283,65 @@ function formatOverlayPlayerFromStored(tag, code) {
   return code ? `${tag} (${code})` : tag
 }
 
+function extractPlayerTag(player, fallback) {
+  if (!player) return fallback || ''
+  const names = player.names || {}
+  return names.netplay || names.code || fallback || ''
+}
+
+function extractPlayerCode(player) {
+  if (!player) return ''
+  const names = player.names || {}
+  return names.code || ''
+}
+
+function hasHaxCodeOrTag(playerInfo) {
+  if (!Array.isArray(playerInfo) || playerInfo.length === 0) return false
+  return playerInfo.some((p) => {
+    const code = String(p?.code || '')
+    if (code === 'XX#02' || code === 'HAX#472') return true
+    const tag = String(p?.tag || '').toLowerCase()
+    return tag.includes('hax') || tag.includes('b0xx')
+  })
+}
+
+async function getHaxFoxColor(replay, playerInfo) {
+  if (typeof replay.index !== 'number' || replay.index >= config.slippiUpdate) return null
+  if (!hasHaxCodeOrTag(playerInfo)) return null
+
+  const SlippiGame = await loadSlippiGame()
+  const game = new SlippiGame(replay.file_path)
+  const settings = game.getSettings ? game.getSettings() : null
+  const players = Array.isArray(settings?.players)
+    ? settings.players.filter((p) => p && typeof p.playerIndex === 'number')
+    : []
+  if (players.length !== 2) return null
+
+  const slippi = await loadSlippiPkg()
+  const sorted = [...players].sort((a, b) => a.playerIndex - b.playerIndex)
+  const foxId = slippi.Character?.FOX ?? 2
+  if (sorted[0]?.characterId !== foxId || sorted[1]?.characterId !== foxId) return null
+
+  const haxIndex = sorted.findIndex((p, idx) => {
+    const connectCode = String(p?.connectCode || '')
+    if (connectCode === 'XX#02' || connectCode === 'HAX#472') return true
+    const fallbackCode = String(playerInfo?.[idx]?.code || '')
+    return fallbackCode === 'XX#02' || fallbackCode === 'HAX#472'
+  })
+  if (haxIndex === -1) return null
+
+  const haxPlayer = sorted[haxIndex]
+  const colorName = slippi.characters?.getCharacterColorName
+    ? slippi.characters.getCharacterColorName(haxPlayer.characterId, haxPlayer.characterColor ?? 0)
+    : 'Default'
+  const color = String(colorName || 'Default').toLowerCase()
+  const code = String(haxPlayer.connectCode || playerInfo?.[haxIndex]?.code || '')
+  if (!code) return null
+  return { index: haxIndex, color, code }
+}
+
 let cachedSlippiGame = null
+let cachedSlippiPkg = null
 async function loadSlippiGame() {
   if (cachedSlippiGame) return cachedSlippiGame
   const require = createRequire(import.meta.url)
@@ -293,4 +362,19 @@ async function loadSlippiGame() {
   }
   cachedSlippiGame = GameCtor
   return GameCtor
+}
+
+async function loadSlippiPkg() {
+  if (cachedSlippiPkg) return cachedSlippiPkg
+  const require = createRequire(import.meta.url)
+  try {
+    const SlippiPkg = require('@slippi/slippi-js')
+    cachedSlippiPkg = SlippiPkg
+    return SlippiPkg
+  } catch (_) {
+    // ignore, fallback to dynamic import
+  }
+  const SlippiPkg = await import('@slippi/slippi-js')
+  cachedSlippiPkg = SlippiPkg.default || SlippiPkg
+  return cachedSlippiPkg
 }

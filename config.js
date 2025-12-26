@@ -63,6 +63,7 @@ export const config = {
   youtubePrivacy: process.env.YOUTUBE_PRIVACY || 'unlisted',
   stitchTimeoutMs: parseNumberEnv('STITCH_TIMEOUT_MS', 4 * 60 * 60 * 1000),
   claimTtlMs: parseNumberEnv('CLAIM_TTL_MS', 24 * 60 * 60 * 1000),
+  slippiUpdate: parseNumberEnv('SLIPPI_UPDATE', 7950),
   // Base directory for replay files (set per machine)
   replayDirectory: process.env.REPLAY_DIRECTORY,
   // Optional: prefix stored in DB file paths to swap with replayDirectory
