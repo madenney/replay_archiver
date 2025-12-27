@@ -32,7 +32,9 @@ export function convertIsoToMmDdYyyyHhMm(isoDateString) {
     const month = lookup.month || '01';
     const day = lookup.day || '01';
     const year = lookup.year || '1970';
-    const hour = lookup.hour || '00';
+    let hour = lookup.hour || '00';
+    // Normalize midnight from "24" to "00" so overlays don't show 24:xx.
+    if (hour === '24') hour = '00';
     const minute = lookup.minute || '00';
     return `${month}/${day}/${year} ${hour}:${minute}`;
 }
