@@ -26,7 +26,14 @@ export async function configureDolphin() {
     throw new Error('Error: could not find game settings file')
   }
 
-  let newSettings = ['[Gecko]', '[Gecko_Enabled]', '$Optional: Game Music OFF', '$Optional: Widescreen 16:9', '[Gecko_Disabled]']
+  let newSettings = [
+    '[Gecko]',
+    '[Gecko_Enabled]',
+    '$Optional: Game Music OFF',
+    '$Optional: Widescreen 16:9',
+    '[Gecko_Disabled]',
+    '$Optional: Show Player Names',
+  ]
   await fsPromises.writeFile(gameSettingsPath, newSettings.join('\n'))
 
   await fsPromises.mkdir(path.dirname(graphicsSettingsPath), { recursive: true })
