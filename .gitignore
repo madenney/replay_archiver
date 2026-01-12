@@ -8,6 +8,9 @@ output/*
 system_monitor/output
 system_monitor/output/*
 
+yt_descriptions
+yt_descriptions/*
+
 node_modules
 
 package-lock.json
