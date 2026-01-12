@@ -11,6 +11,7 @@ import { spawnProcess, runChildProcess } from './childProc.js';
 import { getReadyForStitch, getBlockers, updateFlags } from './db.js';
 import { pad, convertIsoToMmDdYyyyHhMm } from './lib.js';
 import { buildYouTubeDescription } from './youtube_description.js';
+import { getDurationsSecondsFromFfprobe } from './ffprobe.js';
 
 const LEAD_IN_FRAMES = 123;
 
@@ -136,12 +137,17 @@ export async function maybeStitchAndUpload(replay, sendStatus, { onlyIndices = n
     const stitchedFileName = `${sanitizeFileName(archiveTitleSafe)}_${safeStart}_${safeEnd}.mkv`;
     const stitchedPath = path.join(finalDir, stitchedFileName);
     const concatListPath = path.join(finalDir, `concat_${Date.now()}.txt`);
+    const videoDurationsSeconds = await getDurationsSecondsFromFfprobe(
+      videoEntries.map((v) => v.path),
+      videoEntries.map((v) => v.duration),
+      { label: 'youtube-description' },
+    );
     const description = buildYouTubeDescription({
       archiveTitle: archiveTitleSafe,
       startDate,
       endDate,
       indices: videoEntries.map((v) => v.index),
-      durationsSeconds: videoEntries.map((v) => v.duration),
+      durationsSeconds: videoDurationsSeconds,
       totalSeconds,
     });
 
@@ -157,7 +163,7 @@ export async function maybeStitchAndUpload(replay, sendStatus, { onlyIndices = n
       stitchedPath,
       startDate,
       endDate,
-      games: videoEntries.map((v) => ({
+      games: videoEntries.map((v, idx) => ({
         index: v.replay.index,
         file_path: v.replay.file_path,
         video_path: v.path,
@@ -165,6 +171,7 @@ export async function maybeStitchAndUpload(replay, sendStatus, { onlyIndices = n
         players: v.replay.players,
         codes: v.replay.codes,
         game_length_frames: v.replay.game_length_frames,
+        video_duration_seconds: videoDurationsSeconds[idx] ?? v.duration,
       })),
       totalSeconds,
       videoId: null,

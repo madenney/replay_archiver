@@ -31,6 +31,8 @@ export function buildYouTubeDescription({
   indices = [],
   totalSeconds,
   durationsSeconds = [],
+  durationsFrames = [],
+  framesPerSecond = 60,
 }) {
   const safeIndices = Array.isArray(indices) ? indices : [];
   const safeDurations = Array.isArray(durationsSeconds)
@@ -38,15 +40,30 @@ export function buildYouTubeDescription({
         Number.isFinite(duration) && duration >= 0 ? duration : 0
       )
     : [];
-  const lines = [`Games: ${safeIndices.length}`];
-
-  if (startDate && endDate) {
-    lines.push(`Range: ${startDate} to ${endDate}`);
-  }
+  const safeDurationsFrames = Array.isArray(durationsFrames)
+    ? durationsFrames.map((duration) =>
+        Number.isFinite(duration) && duration >= 0 ? duration : 0
+      )
+    : [];
+  const safeFps =
+    Number.isFinite(framesPerSecond) && framesPerSecond > 0 ? framesPerSecond : 60;
+  const lines = [`Total Games: ${safeIndices.length}`];
 
   lines.push('');
-  lines.push('Game Timestamps:');
-  if (safeDurations.length) {
+  lines.push('Game Index - Video Timestamp');
+  if (safeDurationsFrames.length) {
+    let elapsedFrames = 0;
+    safeDurationsFrames.forEach((durationFrames, idx) => {
+      const label = safeIndices[idx];
+      const labelText =
+        (typeof label === 'number' && Number.isFinite(label)) ||
+        (typeof label === 'string' && label.trim())
+          ? label
+          : idx + 1;
+      lines.push(`${labelText} - ${formatYouTubeTimestamp(elapsedFrames / safeFps)}`);
+      elapsedFrames += durationFrames;
+    });
+  } else if (safeDurations.length) {
     let elapsedSeconds = 0;
     safeDurations.forEach((duration, idx) => {
       const label = safeIndices[idx];
