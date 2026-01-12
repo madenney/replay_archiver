@@ -21,6 +21,118 @@ function formatYouTubeTimestamp(totalSeconds) {
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
+function parseDateToMillis(value) {
+  if (!value) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  const parsed = new Date(text);
+  if (!Number.isNaN(parsed.getTime())) return parsed.getTime();
+  const match = text.match(
+    /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2}))?/,
+  );
+  if (!match) return null;
+  const [, month, day, year, hour = '0', minute = '0'] = match;
+  const parsedFallback = new Date(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+  );
+  return Number.isNaN(parsedFallback.getTime()) ? null : parsedFallback.getTime();
+}
+
+function getManifestSortKey(manifest) {
+  const games = Array.isArray(manifest?.games) ? manifest.games : [];
+  const dates = games
+    .map((game) => parseDateToMillis(game?.date))
+    .filter((ts) => Number.isFinite(ts));
+  if (dates.length) {
+    return { missing: false, ts: Math.min(...dates) };
+  }
+  const startTs = parseDateToMillis(manifest?.startDate);
+  if (Number.isFinite(startTs)) return { missing: false, ts: startTs };
+  const endTs = parseDateToMillis(manifest?.endDate);
+  if (Number.isFinite(endTs)) return { missing: false, ts: endTs };
+  return { missing: true, ts: 0 };
+}
+
+function formatDateOnly(timestampMs) {
+  const date = new Date(timestampMs);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${month}/${day}/${year}`;
+}
+
+function formatDateOnlyFromValue(value) {
+  if (!value) return '';
+  const parsed = parseDateToMillis(value);
+  if (Number.isFinite(parsed)) return formatDateOnly(parsed);
+  const text = String(value).trim();
+  if (!text) return '';
+  if (text.includes(' ')) return text.split(' ')[0];
+  if (text.includes('T')) return text.split('T')[0];
+  return text;
+}
+
+function getManifestDateRangeText(manifest) {
+  const start = manifest?.startDate;
+  const end = manifest?.endDate;
+  const startText = start ? formatDateOnlyFromValue(start) : '';
+  const endText = end ? formatDateOnlyFromValue(end) : '';
+  if (startText && endText) return startText === endText ? startText : `${startText} - ${endText}`;
+  if (startText) return startText;
+  if (endText) return endText;
+
+  const games = Array.isArray(manifest?.games) ? manifest.games : [];
+  const dates = games
+    .map((game) => parseDateToMillis(game?.date))
+    .filter((ts) => Number.isFinite(ts));
+  if (!dates.length) return '';
+  const min = Math.min(...dates);
+  const max = Math.max(...dates);
+  const startRange = formatDateOnly(min);
+  const endRange = formatDateOnly(max);
+  return startRange === endRange ? startRange : `${startRange} - ${endRange}`;
+}
+
+function isHaxPlayer(tag, code) {
+  const codeValue = String(code || '');
+  if (codeValue === 'XX#02' || codeValue === 'HAX#472') return true;
+  const tagValue = String(tag || '').toLowerCase();
+  return tagValue.includes('hax') || tagValue.includes('b0xx');
+}
+
+function getNonHaxPlayer(game) {
+  const players = Array.isArray(game?.players) ? game.players : [];
+  const codes = Array.isArray(game?.codes) ? game.codes : [];
+  const total = Math.max(players.length, codes.length);
+  if (!total) return null;
+  const entries = [];
+  for (let i = 0; i < total; i += 1) {
+    entries.push({ tag: players[i] || '', code: codes[i] || '' });
+  }
+  const haxIndices = entries
+    .map((entry, idx) => (isHaxPlayer(entry.tag, entry.code) ? idx : -1))
+    .filter((idx) => idx >= 0);
+  if (haxIndices.length === 1) {
+    return entries.find((_, idx) => idx !== haxIndices[0]) || entries[0];
+  }
+  const nonHax = entries.find((entry) => !isHaxPlayer(entry.tag, entry.code));
+  return nonHax || entries[0];
+}
+
+function formatPlayerLabel(entry) {
+  if (!entry) return 'Unknown';
+  const tag = String(entry.tag || '').trim();
+  const code = String(entry.code || '').trim();
+  if (tag && code) return `${tag} (${code})`;
+  if (tag) return tag;
+  if (code) return code;
+  return 'Unknown';
+}
+
 function resolveVideoPath(game, outputGamesDir) {
   const rawVideoPath = game?.video_path || game?.videoPath || null;
   if (outputGamesDir) {
@@ -117,6 +229,40 @@ async function main() {
     return;
   }
 
+  const manifestEntries = [];
+  let skipped = 0;
+  for (const manifestPath of manifests) {
+    try {
+      const raw = await fsPromises.readFile(manifestPath, 'utf8');
+      const manifest = JSON.parse(raw);
+      const { missing, ts } = getManifestSortKey(manifest);
+      manifestEntries.push({
+        manifestPath,
+        manifest,
+        sortMissing: missing,
+        sortTs: ts,
+      });
+    } catch (err) {
+      console.error(`Skipping ${manifestPath}: ${err.message}`);
+      skipped += 1;
+    }
+  }
+
+  if (manifestEntries.length === 0) {
+    console.log(`No readable manifest files found in ${finalDir}`);
+    return;
+  }
+
+  manifestEntries.sort((a, b) => {
+    if (a.sortMissing !== b.sortMissing) {
+      return a.sortMissing ? 1 : -1;
+    }
+    if (a.sortTs !== b.sortTs) {
+      return a.sortTs - b.sortTs;
+    }
+    return a.manifestPath.localeCompare(b.manifestPath);
+  });
+
   const tmpDir = path.resolve('tmp');
   const markdownPath = path.join(tmpDir, 'index.md');
   const pdfPath = path.resolve('index.pdf');
@@ -124,14 +270,12 @@ async function main() {
   await fsPromises.mkdir(tmpDir, { recursive: true });
   const stream = fs.createWriteStream(markdownPath, { encoding: 'utf8' });
 
-  await writeLine(stream, '# Replay Index');
+  await writeLine(stream, '# Hax Archive Index');
   await writeLine(stream, '');
 
-  for (let i = 0; i < manifests.length; i += 1) {
-    const manifestPath = manifests[i];
+  for (let i = 0; i < manifestEntries.length; i += 1) {
+    const { manifestPath, manifest } = manifestEntries[i];
     try {
-      const raw = await fsPromises.readFile(manifestPath, 'utf8');
-      const manifest = JSON.parse(raw);
       const baseName = getManifestBaseName(manifest, manifestPath);
       const videoId =
         manifest.videoId ||
@@ -139,13 +283,14 @@ async function main() {
         (manifest.title ? byTitle[manifest.title] : null) ||
         null;
       const videoUrl = videoId ? `https://youtu.be/${videoId}` : null;
-      const heading = manifest.title || baseName || path.basename(manifestPath);
+      const dateRange = getManifestDateRangeText(manifest);
+      const heading = dateRange || 'Unknown date';
 
       await writeLine(stream, `## ${heading}`);
       if (videoUrl) {
-        await writeLine(stream, `Video: ${videoUrl}`);
+        await writeLine(stream, `Video link: [${videoUrl}](${videoUrl})`);
       } else {
-        await writeLine(stream, 'Video: (missing videoId)');
+        await writeLine(stream, 'Video link: (missing videoId)');
       }
       await writeLine(stream, '');
 
@@ -186,8 +331,13 @@ async function main() {
         { label: 'index-generator' },
       );
 
+      await writeLine(stream, '| Game | Opponent | Video Timestamp |');
+      await writeLine(stream, '| --- | --- | --- |');
+
       let elapsedSeconds = 0;
       for (let idx = 0; idx < durationsSeconds.length; idx += 1) {
+        const game = games[idx] && typeof games[idx] === 'object' ? games[idx] : {};
+        const playerLabel = formatPlayerLabel(getNonHaxPlayer(game));
         const label = indices[idx];
         const labelText =
           (typeof label === 'number' && Number.isFinite(label)) ||
@@ -201,15 +351,16 @@ async function main() {
         const formattedTimestamp = formatYouTubeTimestamp(elapsedSeconds);
         if (videoUrl) {
           const link = `${videoUrl}?t=${timestampSeconds}`;
-          await writeLine(stream, `- ${labelText}: [${formattedTimestamp}](${link})`);
+          const mdTime = `[${formattedTimestamp}](${link})`;
+          await writeLine(stream, `| ${labelText} | ${playerLabel} | ${mdTime} |`);
         } else {
-          await writeLine(stream, `- ${labelText}: ${formattedTimestamp}`);
+          await writeLine(stream, `| ${labelText} | ${playerLabel} | ${formattedTimestamp} |`);
         }
         elapsedSeconds += durationsSeconds[idx];
       }
 
       await writeLine(stream, '');
-      console.log(`Processed ${i + 1}/${manifests.length}: ${manifestPath}`);
+      console.log(`Processed ${i + 1}/${manifestEntries.length}: ${manifestPath}`);
     } catch (err) {
       console.error(`Failed to process ${manifestPath}: ${err.message}`);
     }
@@ -222,6 +373,10 @@ async function main() {
 
   await runPandoc(markdownPath, pdfPath);
   console.log(`Wrote ${pdfPath}`);
+
+  if (skipped) {
+    console.log(`Skipped ${skipped} unreadable manifest(s).`);
+  }
 }
 
 main().catch((err) => {
