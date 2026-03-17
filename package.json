@@ -8,11 +8,12 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "pg": "^8.11.3",
+    "@slippi/slippi-js": "^6.7.0",
     "better-sqlite3": "^9.4.5",
     "dotenv": "^16.6.1",
     "googleapis": "^166.0.0",
-    "@slippi/slippi-js": "^6.7.0",
+    "pdfkit": "^0.18.0",
+    "pg": "^8.11.3",
     "proper-lockfile": "^4.1.2"
   },
   "author": "",
