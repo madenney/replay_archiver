@@ -56,10 +56,23 @@ function parseBooleanEnv(key, defaultValue) {
   throw new Error(`Invalid boolean for ${key}: ${raw}`)
 }
 
+// When SCRATCH_DIR is set, all intermediate files (-unmerged, -merged,
+// overlay png, dolphin .json) write to SCRATCH_DIR/games/ instead of
+// OUTPUT_DIR/games/. The final overlaid NNNNNN.avi is then atomically
+// published to OUTPUT_DIR/games/. Use on machines where OUTPUT_DIR is
+// a network mount and intermediates would otherwise saturate the link.
+const scratchDir = process.env.SCRATCH_DIR || null
+const scratchGamesDir = scratchDir ? path.join(scratchDir, 'games') : null
+
 export const config = {
   outputDir: process.env.OUTPUT_DIR,
   gamesDir: path.join(process.env.OUTPUT_DIR, 'games'),
   finalDir: path.join(process.env.OUTPUT_DIR, 'final'),
+  scratchDir,
+  scratchGamesDir,
+  // Where per-replay intermediate files actually live. Equal to gamesDir
+  // when SCRATCH_DIR is unset (legacy behavior, no functional change).
+  workingGamesDir: scratchGamesDir || path.join(process.env.OUTPUT_DIR, 'games'),
   keepTempFiles: process.env.KEEP_TEMP_FILES === 'true',
   ssbmIsoPath: process.env.SSBM_ISO_PATH,
   dolphinPath: process.env.DOLPHIN_PATH,

@@ -112,8 +112,9 @@ export async function generateDolphinConfig(replay) {
     isRealTimeMode: false,
     commandId: `${crypto.randomBytes(12).toString('hex')}`,
   }
+  await fsPromises.mkdir(config.workingGamesDir, { recursive: true })
   return fsPromises.writeFile(
-    path.join(config.gamesDir, `${pad(replay.index, 6)}.json`),
+    path.join(config.workingGamesDir, `${pad(replay.index, 6)}.json`),
     JSON.stringify(dolphinConfig)
   )
 }
@@ -122,10 +123,10 @@ export async function runDolphin(replay) {
   const fileBasename = pad(replay.index, 6)
   const dolphinArgs = [
     '-i',
-    path.resolve(config.gamesDir, `${fileBasename}.json`),
+    path.resolve(config.workingGamesDir, `${fileBasename}.json`),
     '-o',
     `${fileBasename}-unmerged`,
-    `--output-directory=${config.gamesDir}`,
+    `--output-directory=${config.workingGamesDir}`,
     '-b',
     '-e',
     config.ssbmIsoPath,
@@ -147,16 +148,16 @@ export async function mergeVideo(replay) {
   const ffmpegMergeArgs = [
     '-y',
     '-i',
-    path.resolve(config.gamesDir, `${fileBasename}-unmerged.avi`),
+    path.resolve(config.workingGamesDir, `${fileBasename}-unmerged.avi`),
     '-i',
-    path.resolve(config.gamesDir, `${fileBasename}-unmerged.wav`),
+    path.resolve(config.workingGamesDir, `${fileBasename}-unmerged.wav`),
     // keep video untouched; just mux audio so overlay step is the only lossy encode
     '-c:v',
     'copy',
     '-c:a',
     'pcm_s16le',
     '-shortest',
-    path.resolve(config.gamesDir, `${fileBasename}-merged.avi`),
+    path.resolve(config.workingGamesDir, `${fileBasename}-merged.avi`),
   ]
 
   await appendRunLog(`ffmpeg merge for replay #${replay.index}`, 'ffmpeg', ffmpegMergeArgs)
@@ -173,10 +174,10 @@ export async function addOverlay(replay, overlayTextBuilder) {
   const overlayText = await overlayTextBuilder(replay)
   const overlayArgs = [
     path.resolve('./overlay.py'),
-    path.resolve(config.gamesDir, `${fileBasename}-merged.avi`),
-    path.resolve(config.gamesDir, `${fileBasename}.avi`),
+    path.resolve(config.workingGamesDir, `${fileBasename}-merged.avi`),
+    path.resolve(config.workingGamesDir, `${fileBasename}.avi`),
     overlayText,
-    path.resolve(config.gamesDir, `${fileBasename}-overlay.png`),
+    path.resolve(config.workingGamesDir, `${fileBasename}-overlay.png`),
   ]
 
   await appendRunLog(`overlay.py for replay #${replay.index}`, 'python3', overlayArgs)
@@ -193,6 +194,9 @@ export async function deleteFiles(replay) {
     return
   }
   const fileBasename = pad(replay.index, 6)
+  // All intermediates live in workingGamesDir (scratch when configured, else gamesDir).
+  // The final NNNNNN.avi in workingGamesDir is also removed here — its canonical
+  // copy lives in gamesDir (NFS) after publishOverlay ran. Final in gamesDir is NOT deleted.
   const filesToDelete = [
     `${fileBasename}-unmerged.avi`,
     `${fileBasename}-unmerged.wav`,
@@ -200,9 +204,13 @@ export async function deleteFiles(replay) {
     `${fileBasename}-overlay.png`,
     `${fileBasename}.json`,
   ]
+  if (config.scratchGamesDir) {
+    // Scratch copy of final .avi — canonical copy is on NFS already
+    filesToDelete.push(`${fileBasename}.avi`)
+  }
 
   for (const file of filesToDelete) {
-    const filePath = path.resolve(config.gamesDir, file)
+    const filePath = path.resolve(config.workingGamesDir, file)
     try {
       await fsPromises.unlink(filePath)
     } catch (error) {
@@ -211,6 +219,27 @@ export async function deleteFiles(replay) {
       }
     }
   }
+}
+
+// Atomically publish the final overlaid NNNNNN.avi from scratch to NFS.
+// No-op when scratch is unused (everything is already in gamesDir).
+//
+// Atomicity guarantee: copy scratch→NFS as a temp file, then rename to the
+// canonical name (rename within the same filesystem is atomic). If we crash
+// before the rename, only the .tmp file exists — the next worker's full
+// re-run will overwrite it cleanly.
+export async function publishOverlay(replay) {
+  if (!config.scratchGamesDir || config.scratchGamesDir === config.gamesDir) {
+    return // legacy mode — overlay already wrote to gamesDir
+  }
+  const fileBasename = pad(replay.index, 6)
+  const src = path.resolve(config.scratchGamesDir, `${fileBasename}.avi`)
+  const finalDst = path.resolve(config.gamesDir, `${fileBasename}.avi`)
+  const tmpDst = `${finalDst}.tmp.${process.pid}.${Date.now()}`
+
+  await fsPromises.mkdir(config.gamesDir, { recursive: true })
+  await fsPromises.copyFile(src, tmpDst)
+  await fsPromises.rename(tmpDst, finalDst)
 }
 
 export async function ensureVideoDurationStored(replay, markReplaysField, fileExistsFn, getVideoDurationFn) {

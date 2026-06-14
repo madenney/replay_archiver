@@ -2,6 +2,13 @@
 // Copy these into your .env file in the project root:
 //
 // OUTPUT_DIR="/path/to/output/dir"
+// (Optional) SCRATCH_DIR="/local/fast/disk/scratch"
+// Set SCRATCH_DIR ONLY on machines where OUTPUT_DIR is a network mount.
+// When set, all per-replay intermediate files (-unmerged, -merged, overlay
+// png, dolphin .json) are written to SCRATCH_DIR/games/ on local disk, and
+// only the final NNNNNN.avi is published to OUTPUT_DIR/games/ (atomically
+// via copy-to-tmp + rename). Drastically reduces NFS bandwidth per worker.
+// Leave unset on machines where OUTPUT_DIR is already a local disk.
 // REPLAY_DIRECTORY="/absolute/path/to/slippi/replays"
 // SSBM_ISO_PATH="/path/to/ssbm/iso"
 // DOLPHIN_PATH="/path/to/dolphin/executable"
