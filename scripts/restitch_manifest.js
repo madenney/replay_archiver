@@ -10,9 +10,11 @@ import { maybeStitchAndUpload } from '../stitcher.js';
 
 const execFileAsync = promisify(execFile);
 
-const FINAL_DIR = '/path/to/output/hax_output/final';
-const GAMES_DIR = '/path/to/output/hax_output/games';
-const UPLOADS_PATH = '/path/to/output/hax_output/uploads.json';
+const OUTPUT_DIR = process.env.OUTPUT_DIR;
+if (!OUTPUT_DIR) { console.error('OUTPUT_DIR env var not set'); process.exit(1); }
+const FINAL_DIR = process.env.FINAL_DIR || path.join(OUTPUT_DIR, 'final');
+const GAMES_DIR = process.env.GAMES_DIR || path.join(OUTPUT_DIR, 'games');
+const UPLOADS_PATH = process.env.UPLOADS_JSON || path.join(OUTPUT_DIR, 'uploads.json');
 const RESTITCH_LOG = path.resolve('reports/restitch_log.json');
 
 const manifestArg = process.argv[2];

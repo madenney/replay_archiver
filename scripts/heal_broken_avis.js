@@ -24,8 +24,10 @@ for (const [vid, e] of Object.entries(report)) {
 }
 
 // Also load uploads.json + manifest files to get every index in each affected manifest
-const FINAL_DIR = '/path/to/output/hax_output/final';
-const UPLOADS_PATH = '/path/to/output/hax_output/uploads.json';
+const OUTPUT_DIR = process.env.OUTPUT_DIR;
+if (!OUTPUT_DIR) { console.error('OUTPUT_DIR env var not set'); process.exit(1); }
+const FINAL_DIR = process.env.FINAL_DIR || path.join(OUTPUT_DIR, 'final');
+const UPLOADS_PATH = process.env.UPLOADS_JSON || path.join(OUTPUT_DIR, 'uploads.json');
 const uploads = JSON.parse(await fs.readFile(UPLOADS_PATH, 'utf8'));
 for (const vid of Object.keys(report)) {
   const u = uploads.find((x) => x.videoId === vid);

@@ -1,9 +1,15 @@
+require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 
-const manifestDir = '/path/to/output/hax_output/final';
-const gamesDir = '/path/to/output/hax_output/games';
-const uploads = require('/path/to/output/hax_output/uploads.json');
+const OUTPUT_DIR = process.env.OUTPUT_DIR;
+if (!OUTPUT_DIR) {
+  console.error('OUTPUT_DIR env var not set');
+  process.exit(1);
+}
+const manifestDir = process.env.FINAL_DIR || path.join(OUTPUT_DIR, 'final');
+const gamesDir = process.env.GAMES_DIR || path.join(OUTPUT_DIR, 'games');
+const uploads = JSON.parse(fs.readFileSync(process.env.UPLOADS_JSON || path.join(OUTPUT_DIR, 'uploads.json'), 'utf8'));
 
 // Build set of uploaded MKV stitched paths (from uploads.json)
 const uploadedStitchedPaths = new Set();

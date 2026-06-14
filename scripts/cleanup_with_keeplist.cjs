@@ -1,9 +1,15 @@
+require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 
-const MANIFEST_DIR = '/path/to/output/hax_output/final';
-const GAMES_DIR = '/path/to/output/hax_output/games';
-const UPLOADS_PATH = '/path/to/output/hax_output/uploads.json';
+const OUTPUT_DIR = process.env.OUTPUT_DIR;
+if (!OUTPUT_DIR) {
+  console.error('OUTPUT_DIR env var not set');
+  process.exit(1);
+}
+const MANIFEST_DIR = process.env.FINAL_DIR || path.join(OUTPUT_DIR, 'final');
+const GAMES_DIR = process.env.GAMES_DIR || path.join(OUTPUT_DIR, 'games');
+const UPLOADS_PATH = process.env.UPLOADS_JSON || path.join(OUTPUT_DIR, 'uploads.json');
 
 const EXECUTE = process.argv.includes('--execute');
 
@@ -22,7 +28,7 @@ const PROTECT_VIDEO_IDS = new Set([
   'KHBxumrbh2c',
 ]);
 
-const uploads = require(UPLOADS_PATH);
+const uploads = JSON.parse(fs.readFileSync(UPLOADS_PATH, 'utf8'));
 
 // Step 1: figure out which uploads.json entries are "protected" (don't delete their MKV/AVIs)
 const protectedUploads = uploads.filter((u) => PROTECT_VIDEO_IDS.has(u.videoId));

@@ -3,8 +3,10 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { google } from 'googleapis';
 
-const UPLOADS_PATH = '/path/to/output/hax_output/uploads.json';
-const FINAL_DIR = '/path/to/output/hax_output/final';
+const OUTPUT_DIR = process.env.OUTPUT_DIR;
+if (!OUTPUT_DIR) { console.error('OUTPUT_DIR env var not set'); process.exit(1); }
+const FINAL_DIR = process.env.FINAL_DIR || path.join(OUTPUT_DIR, 'final');
+const UPLOADS_PATH = process.env.UPLOADS_JSON || path.join(OUTPUT_DIR, 'uploads.json');
 const REPLACED_DIR = path.resolve('manifest_backups/replaced');
 const RESTITCH_LOG = path.resolve('reports/restitch_log.json');
 const EXECUTE = process.argv.includes('--execute');
