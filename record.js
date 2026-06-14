@@ -27,6 +27,7 @@ import {
   addOverlay,
   deleteFiles,
   buildOverlayText,
+  publishOverlay,
 } from './media.js';
 import { maybeStitchAndUpload, markReplaysField } from './stitcher.js';
 const dbReady = initSchema();
@@ -34,6 +35,8 @@ const dbReady = initSchema();
 const {
     gamesDir,
     finalDir,
+    workingGamesDir,
+    scratchGamesDir,
     numWorkers,
     claimTtlMs,
 } = config;
@@ -65,17 +68,23 @@ async function printRunStats() {
 
 function getReplayArtifactPaths(replay, { includeFinal = true } = {}) {
     const fileBasename = pad(replay.index, 6);
-    const files = [
+    const intermediates = [
         `${fileBasename}-unmerged.avi`,
         `${fileBasename}-unmerged.wav`,
         `${fileBasename}-merged.avi`,
         `${fileBasename}-overlay.png`,
         `${fileBasename}.json`,
     ];
-    if (includeFinal) {
-        files.push(`${fileBasename}.avi`);
+    const paths = intermediates.map((file) => path.resolve(workingGamesDir, file));
+    if (scratchGamesDir) {
+        // Also clear the scratch copy of the final overlay if it lingered
+        paths.push(path.resolve(workingGamesDir, `${fileBasename}.avi`));
     }
-    return files.map((file) => path.resolve(gamesDir, file));
+    if (includeFinal) {
+        // Canonical final always lives in gamesDir (NFS or local depending on setup)
+        paths.push(path.resolve(gamesDir, `${fileBasename}.avi`));
+    }
+    return paths;
 }
 
 async function deleteReplayArtifacts(replay, files = null) {
@@ -88,6 +97,47 @@ async function deleteReplayArtifacts(replay, files = null) {
             if (error.code !== 'ENOENT') {
                 console.error(`Failed to delete ${filePath}: ${error.message}`);
             }
+        }
+    }
+}
+
+// On worker startup: scrub leftover artifacts from a previous crash.
+// - scratch/games/ may have stale intermediates (and possibly an unpublished final .avi)
+// - gamesDir may have stale .tmp.* files from a publishOverlay() that crashed mid-rename
+async function cleanOrphansOnStartup() {
+    if (scratchGamesDir) {
+        try {
+            const entries = await fsPromises.readdir(scratchGamesDir);
+            let cleaned = 0;
+            for (const name of entries) {
+                try {
+                    await fsPromises.unlink(path.resolve(scratchGamesDir, name));
+                    cleaned += 1;
+                } catch (_) { /* ignore */ }
+            }
+            if (cleaned > 0) {
+                console.log(`Startup cleanup: removed ${cleaned} orphan scratch file(s) from ${scratchGamesDir}`);
+                await appendRunLog(`Startup cleanup: removed ${cleaned} scratch orphans`, 'startup-cleanup', []);
+            }
+        } catch (err) {
+            if (err.code !== 'ENOENT') {
+                console.error(`Startup cleanup of scratch failed: ${err.message}`);
+            }
+        }
+    }
+    try {
+        const entries = await fsPromises.readdir(gamesDir);
+        const tmpFiles = entries.filter((n) => /\.tmp\.\d+\.\d+$/.test(n));
+        for (const name of tmpFiles) {
+            try { await fsPromises.unlink(path.resolve(gamesDir, name)); } catch (_) {}
+        }
+        if (tmpFiles.length > 0) {
+            console.log(`Startup cleanup: removed ${tmpFiles.length} stale .tmp file(s) from ${gamesDir}`);
+            await appendRunLog(`Startup cleanup: removed ${tmpFiles.length} NFS .tmp orphans`, 'startup-cleanup', []);
+        }
+    } catch (err) {
+        if (err.code !== 'ENOENT') {
+            console.error(`Startup cleanup of gamesDir failed: ${err.message}`);
         }
     }
 }
@@ -147,6 +197,10 @@ export async function record(options = {}) {
     await checkHealth();
     await fsPromises.mkdir(gamesDir, { recursive: true });
     await fsPromises.mkdir(finalDir, { recursive: true });
+    if (scratchGamesDir) {
+        await fsPromises.mkdir(scratchGamesDir, { recursive: true });
+    }
+    await cleanOrphansOnStartup();
     await printRunStats();
     if (!stitchWorkerEnabled) {
         console.log('Mode: record/merge/overlay only (stitch/upload disabled for this run).');
@@ -856,15 +910,16 @@ if (!isMainThread) {
                 }
 
                 if (replay.recorded && !replay.overlaid) {
-                    sendStatus('Already recorded; adding overlay');
-                    await addOverlay(replay, buildOverlayText);
-                    await markReplaysField([replay], { overlaid: true, stitch_pending: 1 });
-                    replay.overlaid = true;
-                    replay.stitch_pending = 1;
-                    sendStatus('Deleting Files');
-                    await deleteFiles(replay);
-                    sendStatus('Handing to stitch/upload worker');
-                    await finishReplay(replay, 'recorded fast-path - overlay added');
+                    // Legacy stale state from before SCRATCH_DIR was introduced (recorded=1 was
+                    // set after merge, before overlay) — the -merged.avi may be on another
+                    // worker's local scratch and inaccessible here. Reset to redo cleanly.
+                    sendStatus('Stale recorded=1/overlaid=0 state; resetting for full re-run');
+                    await markReplaysField([replay], {
+                        recorded: 0,
+                        claimed_by: null,
+                        claimed_at: null,
+                    });
+                    await finishReplay(replay, 'stale recorded state - reset for full re-run');
                     return;
                 }
 
@@ -878,12 +933,18 @@ if (!isMainThread) {
 
                 sendStatus('Merging Video');
                 await mergeVideo(replay);
-                await markReplaysField([replay], { recorded: true });
-                replay.recorded = true;
 
                 sendStatus('Adding Overlay');
                 await addOverlay(replay, buildOverlayText);
-                await markReplaysField([replay], { overlaid: true, stitch_pending: 1 });
+
+                sendStatus('Publishing final to gamesDir');
+                await publishOverlay(replay);
+
+                // Both flags set together AFTER the final .avi is durably at its canonical
+                // gamesDir path. If anything crashed before this point, DB still shows
+                // recorded=0/overlaid=0 and the next worker re-does the full pipeline.
+                await markReplaysField([replay], { recorded: true, overlaid: true, stitch_pending: 1 });
+                replay.recorded = true;
                 replay.overlaid = true;
                 replay.stitch_pending = 1;
                 sendStatus('Overlay complete');
