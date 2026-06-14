@@ -20,3 +20,9 @@ replays.db
 
 tmp
 tmp2
+
+__pycache__
+*.pyc
+notes.txt
+scripts/cleanup_delete_list.txt
+scripts/cleanup_keeplist_delete_list.txt
