@@ -1,5 +1,6 @@
 import path from 'path'
 import fs from 'fs'
+import os from 'os'
 import readline from 'readline'
 import crypto from 'crypto'
 import { promises as fsPromises } from 'fs'
@@ -11,7 +12,7 @@ import { pad, convertIsoToMmDdYyyyHhMm } from './lib.js'
 
 export async function configureDolphin() {
   const { bitrateKbps, quality } = config
-  const dolphinDirname = path.resolve('/home/user/.config/SlippiPlayback')
+  const dolphinDirname = path.join(os.homedir(), '.config', 'SlippiPlayback')
   const gameSettingsPath = path.join(dolphinDirname, 'GameSettings', 'GALE01.ini')
   const graphicsSettingsPath = path.join(dolphinDirname, 'Config', 'GFX.ini')
   const dolphinSettingsPath = path.join(dolphinDirname, 'Config', 'Dolphin.ini')
