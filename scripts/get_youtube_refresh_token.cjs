@@ -6,6 +6,8 @@ require("dotenv").config();
 const SCOPES = [
   // allows uploads:
   "https://www.googleapis.com/auth/youtube.upload",
+  // allows editing video metadata (title, description, tags, etc.):
+  "https://www.googleapis.com/auth/youtube.force-ssl",
 ];
 
 async function main() {
@@ -35,6 +37,11 @@ async function main() {
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", async (code) => {
     code = code.trim();
+    // Handle pasting the full redirect URL instead of just the code
+    if (code.startsWith("http")) {
+      const url = new URL(code);
+      code = url.searchParams.get("code") || code;
+    }
     try {
       const { tokens } = await oauth2Client.getToken(code);
       console.log("\nTokens from Google:\n", tokens);

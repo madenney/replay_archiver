@@ -11,9 +11,10 @@ import { spawnProcess, runChildProcess } from './childProc.js';
 import { getReadyForStitch, getBlockers, updateFlags } from './db.js';
 import { pad, convertIsoToMmDdYyyyHhMm } from './lib.js';
 import { buildYouTubeDescription } from './youtube_description.js';
-import { getDurationsSecondsFromFfprobe } from './ffprobe.js';
+import { getDurationsSecondsFromFfprobe, probeDurationSeconds } from './ffprobe.js';
 
 const LEAD_IN_FRAMES = 123;
+const STITCH_TRUNCATE_TOLERANCE_SECONDS = 60;
 
 const {
   gamesDir,
@@ -25,6 +26,7 @@ const {
   youtubeClientSecret,
   youtubeRefreshToken,
   youtubePrivacy,
+  youtubeMadeForKids,
   stitchTimeoutMs,
 } = config;
 
@@ -153,6 +155,19 @@ export async function maybeStitchAndUpload(replay, sendStatus, { onlyIndices = n
 
     sendStatus?.('Stitching Videos');
     await stitchVideos(videoEntries, stitchedPath, concatListPath);
+
+    const actualSec = await probeDurationSeconds(stitchedPath).catch(() => null);
+    if (!actualSec || actualSec < totalSeconds - STITCH_TRUNCATE_TOLERANCE_SECONDS) {
+      await appendRunLog(
+        `Stitch truncated: actual=${actualSec}s expected=${totalSeconds}s for ${stitchedPath} — aborting upload, source AVIs likely corrupt`,
+        'stitch-truncated',
+        [stitchedPath]
+      );
+      throw new Error(
+        `Stitched MKV truncated: ${actualSec}s < expected ${totalSeconds}s (tolerance ${STITCH_TRUNCATE_TOLERANCE_SECONDS}s). Aborting upload.`
+      );
+    }
+
     await markReplaysField(videoEntries, {
       stitched: true,
       stitch_pending: 1,
@@ -346,6 +361,7 @@ async function uploadToYouTube({ filePath, title, description, onProgress }) {
         },
         status: {
           privacyStatus: youtubePrivacy,
+          selfDeclaredMadeForKids: youtubeMadeForKids,
         },
       },
       media: {

@@ -42,6 +42,20 @@ function parseNumberEnv(key, defaultValue) {
   return num
 }
 
+function parseBooleanEnv(key, defaultValue) {
+  const raw = process.env[key]
+  if ((raw === undefined || raw === null || raw === '') && defaultValue !== undefined) {
+    return defaultValue
+  }
+  const cleaned = String(raw ?? '')
+    .split('#')[0]
+    .trim()
+    .toLowerCase()
+  if (cleaned === 'true' || cleaned === '1') return true
+  if (cleaned === 'false' || cleaned === '0') return false
+  throw new Error(`Invalid boolean for ${key}: ${raw}`)
+}
+
 export const config = {
   outputDir: process.env.OUTPUT_DIR,
   gamesDir: path.join(process.env.OUTPUT_DIR, 'games'),
@@ -61,6 +75,7 @@ export const config = {
   youtubeClientSecret: process.env.YOUTUBE_CLIENT_SECRET,
   youtubeRefreshToken: process.env.YOUTUBE_REFRESH_TOKEN,
   youtubePrivacy: process.env.YOUTUBE_PRIVACY || 'unlisted',
+  youtubeMadeForKids: parseBooleanEnv('YOUTUBE_MADE_FOR_KIDS', false),
   stitchTimeoutMs: parseNumberEnv('STITCH_TIMEOUT_MS', 4 * 60 * 60 * 1000),
   claimTtlMs: parseNumberEnv('CLAIM_TTL_MS', 24 * 60 * 60 * 1000),
   slippiUpdate: parseNumberEnv('SLIPPI_UPDATE', 7950),
