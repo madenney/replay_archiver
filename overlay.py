@@ -13,6 +13,7 @@ MAXRATE_DEFAULT = os.getenv('FFMPEG_MAXRATE_KBPS')
 BUFSIZE_DEFAULT = os.getenv('FFMPEG_BUFSIZE_KBPS')
 PRESET_DEFAULT = os.getenv('FFMPEG_PRESET', 'slow')
 PROFILE_DEFAULT = os.getenv('FFMPEG_PROFILE', 'high')
+USE_NVENC = os.getenv('USE_NVENC', '').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
 def parse_int(value, fallback=None):
@@ -114,15 +115,27 @@ def overlay_text_on_video(video_path, overlay_image_path, output_video_path):
         '-y',
         '-i', video_path,
         '-i', overlay_image_path,
-        # Ensure overlay matches source, then pad to even dimensions (libx264 requirement)
+        # Ensure overlay matches source, then pad to even dimensions (yuv420p requirement)
         '-filter_complex', '[0:v][1:v]scale2ref[vid][ovr];[vid][ovr]overlay=format=auto:0:0,pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0',
-        '-c:v', 'libx264',
-        '-preset', preset,
-        '-profile:v', profile,
-        '-pix_fmt', 'yuv420p',
     ]
+    if USE_NVENC:
+        cmd.extend([
+            '-c:v', 'hevc_nvenc',
+            '-preset', 'p7',
+            '-rc', 'vbr',
+            '-pix_fmt', 'yuv420p',
+        ])
+        quality_flag = '-cq'
+    else:
+        cmd.extend([
+            '-c:v', 'libx264',
+            '-preset', preset,
+            '-profile:v', profile,
+            '-pix_fmt', 'yuv420p',
+        ])
+        quality_flag = '-crf'
     if crf is not None:
-        cmd.extend(['-crf', str(crf)])
+        cmd.extend([quality_flag, str(crf)])
         if maxrate_kbps:
             cmd.extend(['-maxrate', f'{maxrate_kbps}k'])
         if bufsize_kbps:
