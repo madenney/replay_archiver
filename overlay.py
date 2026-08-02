@@ -4,8 +4,8 @@ import subprocess
 import json
 from PIL import Image, ImageDraw, ImageFont
 
-# Path to the font file
-FONT_PATH = '/path/to/replay_archiver/cour_bold.ttf'
+# Path to the font file (checked into the repo alongside this script)
+FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cour_bold.ttf')
 BITRATE_DEFAULT = os.getenv('BITRATE_KBPS', '15000')
 # Encoding defaults favor quality-per-bit; CRF is capped by maxrate to avoid huge files.
 CRF_DEFAULT = os.getenv('FFMPEG_CRF', '18')
