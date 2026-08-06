@@ -119,11 +119,15 @@ def overlay_text_on_video(video_path, overlay_image_path, output_video_path):
         '-filter_complex', '[0:v][1:v]scale2ref[vid][ovr];[vid][ovr]overlay=format=auto:0:0,pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0',
     ]
     if USE_NVENC:
+        # AVI has no standard FOURCC for HEVC; without an explicit tag ffmpeg
+        # writes codec_tag=0x0000 and readers misidentify the stream as rawvideo,
+        # which then breaks the -c:v copy stitch step.
         cmd.extend([
             '-c:v', 'hevc_nvenc',
             '-preset', 'p7',
             '-rc', 'vbr',
             '-pix_fmt', 'yuv420p',
+            '-tag:v', 'hvc1',
         ])
         quality_flag = '-cq'
     else:
