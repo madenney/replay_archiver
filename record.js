@@ -15,6 +15,7 @@ import {
   getVideoEntries,
   initSchema,
   releaseClaim,
+  recordReplayError,
 } from './db.js';
 import { config } from './config.js';
 import { appendRunLog, fileExists } from './util_log.js';
@@ -963,9 +964,20 @@ if (!isMainThread) {
                     );
                 }
                 try {
-                    await markReplaysField([replay], { claimed_by: null, claimed_at: null });
+                    const { errorCount, autoSkipped } = await recordReplayError(
+                        replay.index,
+                        config.maxReplayErrors,
+                    );
+                    if (autoSkipped) {
+                        const msg = `Auto-skipped replay #${replay.index} after ${errorCount} failed attempts (last error: ${error.message})`;
+                        console.error(msg);
+                        try { await appendRunLog(msg, 'auto-skip', []); } catch (_) {}
+                    }
                 } catch (_) {
-                    // ignore
+                    // if the DB update itself fails, fall back to just releasing the claim
+                    try {
+                        await markReplaysField([replay], { claimed_by: null, claimed_at: null });
+                    } catch (__) { /* ignore */ }
                 }
                 parentPort.postMessage({ status: 'error', error: error.message });
             }
