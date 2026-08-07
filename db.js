@@ -40,6 +40,7 @@ const ALLOWED_UPDATE_FIELDS = new Set([
   'skip',
   'claimed_by',
   'claimed_at',
+  'error_count',
 ])
 
 function resolveReplayPath(filePath) {
@@ -95,8 +96,10 @@ export async function initSchema() {
       idx INTEGER UNIQUE NOT NULL,
       file_path TEXT NOT NULL,
       players TEXT,
-      codes TEXT
+      codes TEXT,
+      error_count INTEGER DEFAULT 0
     );
+    ALTER TABLE replays ADD COLUMN IF NOT EXISTS error_count INTEGER DEFAULT 0;
     CREATE INDEX IF NOT EXISTS replays_idx_idx ON replays(idx);
     CREATE INDEX IF NOT EXISTS replays_uploaded_idx ON replays(uploaded);
     CREATE INDEX IF NOT EXISTS replays_overlaid_idx ON replays(overlaid);
@@ -152,6 +155,7 @@ function rowToReplay(row) {
     skip: !!row.skip,
     claimed_by: row.claimed_by,
     claimed_at: row.claimed_at,
+    error_count: row.error_count || 0,
   }
 }
 
@@ -371,6 +375,29 @@ export async function updateFlags(ids, fields) {
 
 export async function releaseClaim(idx) {
   await pool.query(`UPDATE replays SET claimed_by = NULL, claimed_at = NULL WHERE idx = $1`, [idx])
+}
+
+// Atomically increments error_count and releases the claim. If the new count
+// reaches maxErrors, also sets skip = 1 so the replay stops blocking the
+// stitcher and future worker picks fast-path finish it. Returns the new count
+// and whether an auto-skip fired.
+export async function recordReplayError(idx, maxErrors) {
+  const { rows } = await pool.query(
+    `UPDATE replays
+     SET error_count = COALESCE(error_count, 0) + 1,
+         claimed_by = NULL,
+         claimed_at = NULL,
+         skip = CASE WHEN COALESCE(error_count, 0) + 1 >= $2 THEN 1 ELSE skip END
+     WHERE idx = $1
+     RETURNING error_count, skip`,
+    [idx, maxErrors]
+  )
+  const row = rows[0]
+  if (!row) return { errorCount: 0, autoSkipped: false }
+  return {
+    errorCount: row.error_count,
+    autoSkipped: row.error_count >= maxErrors && !!row.skip,
+  }
 }
 
 export async function getReadyForStitch({ onlyIndices = null } = {}) {
