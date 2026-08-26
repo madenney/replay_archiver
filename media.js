@@ -9,6 +9,18 @@ import { spawnProcess, runChildProcess, killDolphinOnEndFrame } from './childPro
 import { config } from './config.js'
 import { appendRunLog } from './util_log.js'
 import { pad, convertIsoToMmDdYyyyHhMm } from './lib.js'
+import { probeDurationSeconds } from './ffprobe.js'
+
+// Dolphin plays from frame -123 through (game_length_frames - 1), so the
+// expected recording covers game_length_frames + 123 frames at 60 fps.
+// Matches stitcher.js's LEAD_IN_FRAMES.
+const DOLPHIN_LEAD_IN_FRAMES = 123
+const DOLPHIN_FPS = 60
+// If Dolphin dies (SIGKILL, crash, EIO on scratch) it can leave a partial .avi
+// whose duration is much shorter than the game. Throwing here feeds into the
+// worker's recordReplayError path (auto-skip after MAX_REPLAY_ERRORS attempts)
+// instead of letting the truncation propagate through overlay -> stitch.
+const DOLPHIN_DURATION_TOLERANCE_SECONDS = 5
 
 export async function configureDolphin() {
   const { bitrateKbps, quality } = config
@@ -142,6 +154,28 @@ export async function runDolphin(replay) {
     replayIndex: replay.index,
     timeoutMs: config.dolphinTimeoutMs,
   })
+
+  const expectedFrames = typeof replay.game_length_frames === 'number' ? replay.game_length_frames : null
+  if (expectedFrames && expectedFrames > 0) {
+    const expectedSeconds = (expectedFrames + DOLPHIN_LEAD_IN_FRAMES) / DOLPHIN_FPS
+    const outputPath = path.resolve(config.workingGamesDir, `${fileBasename}-unmerged.avi`)
+    let actualSeconds = null
+    try {
+      actualSeconds = await probeDurationSeconds(outputPath)
+    } catch (err) {
+      throw new Error(`Dolphin post-record probe failed for replay #${replay.index}: ${err.message}`)
+    }
+    if (actualSeconds == null) {
+      throw new Error(`Dolphin produced unreadable .avi for replay #${replay.index} (ffprobe returned no duration)`)
+    }
+    if (expectedSeconds - actualSeconds > DOLPHIN_DURATION_TOLERANCE_SECONDS) {
+      throw new Error(
+        `Dolphin recorded truncated .avi for replay #${replay.index}: ` +
+        `expected ${expectedSeconds.toFixed(2)}s, got ${actualSeconds.toFixed(2)}s ` +
+        `(short by ${(expectedSeconds - actualSeconds).toFixed(2)}s)`
+      )
+    }
+  }
 }
 
 export async function mergeVideo(replay) {
