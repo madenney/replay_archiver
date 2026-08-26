@@ -1,5 +1,19 @@
 import { spawn } from 'child_process'
 
+// Kill a child and everything it spawned via its process group.
+// spawnProcess uses { detached: true } so each child becomes its own pgroup
+// leader (setsid on posix); process.kill(-pid, sig) targets that whole group.
+// Prevents the AppImage-inner-binary orphan pattern where SIGKILLing the
+// wrapper leaves the real Dolphin/ffmpeg running reparented under init.
+export const killTree = (child, signal = 'SIGKILL') => {
+  if (!child || !child.pid) return
+  try {
+    process.kill(-child.pid, signal)
+  } catch (_) {
+    try { child.kill(signal) } catch (__) { /* ignore */ }
+  }
+}
+
 export const runChildProcess = (child, { name, replayIndex, timeoutMs }) =>
   new Promise((resolve, reject) => {
     let finished = false;
@@ -41,11 +55,7 @@ export const runChildProcess = (child, { name, replayIndex, timeoutMs }) =>
       timeoutMs != null
         ? setTimeout(() => {
             const err = new Error(`${name} timed out for replay #${replayIndex} after ${timeoutMs}ms`);
-            try {
-              child.kill('SIGKILL');
-            } catch (_) {
-              // ignore
-            }
+            killTree(child, 'SIGKILL');
             done(err);
           }, timeoutMs)
         : null;
@@ -60,7 +70,9 @@ export const runChildProcess = (child, { name, replayIndex, timeoutMs }) =>
     });
   });
 
-export const spawnProcess = (cmd, args) => spawn(cmd, args);
+// detached:true puts the child in its own process group so killTree() can
+// signal the whole tree. We do NOT unref — parent still waits for exit.
+export const spawnProcess = (cmd, args) => spawn(cmd, args, { detached: true });
 
 export const killDolphinOnEndFrame = (child) => {
   if (!child || !child.stdout) {
@@ -82,7 +94,7 @@ export const killDolphinOnEndFrame = (child) => {
           endFrame = Infinity;
         }
       } else if (line.includes(`[CURRENT_FRAME] ${endFrame}`)) {
-        child.kill();
+        killTree(child, 'SIGTERM');
       }
     });
   });
