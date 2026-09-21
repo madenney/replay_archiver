@@ -31,6 +31,13 @@ import {
   publishOverlay,
 } from './media.js';
 import { maybeStitchAndUpload, markReplaysField } from './stitcher.js';
+import { probeDurationSeconds } from './ffprobe.js';
+
+// Same lead-in/fps/tolerance as media.js's post-Dolphin check; used to validate
+// a pre-existing final .avi before trusting it in the fast path.
+const FINAL_LEAD_IN_FRAMES = 123;
+const FINAL_FPS = 60;
+const FINAL_DURATION_TOLERANCE_SECONDS = 5;
 const dbReady = initSchema();
 
 const {
@@ -899,14 +906,27 @@ if (!isMainThread) {
                 if (!replay.overlaid) {
                     const finalVideoPath = path.resolve(gamesDir, `${pad(replay.index, 6)}.avi`);
                     if (await fileExists(finalVideoPath)) {
-                        sendStatus('Final video exists; updating flags');
-                        await markReplaysField([replay], { recorded: true, overlaid: true, stitch_pending: 1 });
-                        replay.recorded = true;
-                        replay.overlaid = true;
-                        replay.stitch_pending = 1;
-                        sendStatus('Handing to stitch/upload worker');
-                        await finishReplay(replay, 'final video already exists - flags updated');
-                        return;
+                        // A final .avi can exist but be truncated (overlay.py died mid-write on a
+                        // full disk / crash). Only trust it if its duration matches the game;
+                        // otherwise remove it and fall through to a full re-record.
+                        const expectedSeconds = (replay.game_length_frames + FINAL_LEAD_IN_FRAMES) / FINAL_FPS;
+                        const actualSeconds = await probeDurationSeconds(finalVideoPath).catch(() => null);
+                        if (actualSeconds == null || expectedSeconds - actualSeconds > FINAL_DURATION_TOLERANCE_SECONDS) {
+                            const msg = `Existing final for replay #${replay.index} is truncated/unreadable ` +
+                                `(expected ${expectedSeconds.toFixed(1)}s, got ${actualSeconds == null ? 'n/a' : actualSeconds.toFixed(1) + 's'}); re-recording`;
+                            sendStatus('Existing final truncated; re-recording');
+                            await appendRunLog(msg, `worker-${workerId}`, []);
+                            await fsPromises.unlink(finalVideoPath).catch(() => {});
+                        } else {
+                            sendStatus('Final video exists; updating flags');
+                            await markReplaysField([replay], { recorded: true, overlaid: true, stitch_pending: 1 });
+                            replay.recorded = true;
+                            replay.overlaid = true;
+                            replay.stitch_pending = 1;
+                            sendStatus('Handing to stitch/upload worker');
+                            await finishReplay(replay, 'final video already exists - flags updated');
+                            return;
+                        }
                     }
                 }
 
