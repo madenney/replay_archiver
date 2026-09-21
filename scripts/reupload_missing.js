@@ -15,8 +15,14 @@ const YOUTUBE_CLIENT_ID = process.env.YOUTUBE_CLIENT_ID;
 const YOUTUBE_CLIENT_SECRET = process.env.YOUTUBE_CLIENT_SECRET;
 const YOUTUBE_REFRESH_TOKEN = process.env.YOUTUBE_REFRESH_TOKEN;
 
-// The two videos missing from YouTube
-const MISSING_VIDEO_IDS = ['DLNHHo2SPuY', 'Ti8Dhbz7s7U'];
+// Video IDs (from uploads.json) that are missing from YouTube and should be
+// re-uploaded from their local MKV. Pass as CLI args:
+//   node scripts/reupload_missing.js <videoId> [<videoId> ...]
+const MISSING_VIDEO_IDS = process.argv.slice(2).filter((a) => !a.startsWith('-'));
+if (MISSING_VIDEO_IDS.length === 0) {
+  console.error('Usage: node scripts/reupload_missing.js <videoId> [<videoId> ...]');
+  process.exit(1);
+}
 
 function getManifestPath(upload) {
   const sp = upload.stitchedPath || '';
