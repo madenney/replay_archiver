@@ -16,6 +16,26 @@ import { getDurationsSecondsFromFfprobe, probeDurationSeconds } from './ffprobe.
 const LEAD_IN_FRAMES = 123;
 const STITCH_TRUNCATE_TOLERANCE_SECONDS = 60;
 
+// A stitched MKV represents hours of ffmpeg work, so a transient upload failure
+// (Google 5xx, socket reset, rate limit) should not throw the batch away and
+// force a re-stitch on the next pass. Retry the upload itself with backoff.
+const UPLOAD_MAX_ATTEMPTS = 5;
+const UPLOAD_RETRY_BASE_MS = 30 * 1000;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function isRetriableUploadError(err) {
+  if (!err) return false;
+  const status = err.code ?? err.status ?? err.response?.status;
+  if (typeof status === 'number') {
+    // 408 timeout, 429 rate limit, 5xx server errors.
+    return status === 408 || status === 429 || (status >= 500 && status < 600);
+  }
+  const msg = String(err.message || '');
+  if (/\b(408|429|5\d\d)\b/.test(msg)) return true;
+  return /ECONNRESET|ETIMEDOUT|ECONNREFUSED|EPIPE|ENOTFOUND|EAI_AGAIN|socket hang up|network|Server Error/i.test(msg);
+}
+
 const {
   gamesDir,
   finalDir,
@@ -153,8 +173,28 @@ export async function maybeStitchAndUpload(replay, sendStatus, { onlyIndices = n
       totalSeconds,
     });
 
-    sendStatus?.('Stitching Videos');
-    await stitchVideos(videoEntries, stitchedPath, concatListPath);
+    // A previous pass may have stitched this exact batch and then failed to
+    // upload (transient API error, killed process). Re-stitching is ~1h of
+    // ffmpeg for a byte-identical result, so reuse the existing MKV when it is
+    // already present and full-length; otherwise (re)stitch.
+    let reusedExistingStitch = false;
+    if (await fileExists(stitchedPath)) {
+      const existingSec = await probeDurationSeconds(stitchedPath).catch(() => null);
+      if (existingSec && existingSec >= totalSeconds - STITCH_TRUNCATE_TOLERANCE_SECONDS) {
+        reusedExistingStitch = true;
+        await appendRunLog(
+          `Reusing existing stitched MKV (${existingSec}s, expected ${totalSeconds}s): ${stitchedPath}`,
+          'stitch-reuse',
+          [stitchedPath]
+        );
+        sendStatus?.('Reusing existing stitched video');
+      }
+    }
+
+    if (!reusedExistingStitch) {
+      sendStatus?.('Stitching Videos');
+      await stitchVideos(videoEntries, stitchedPath, concatListPath);
+    }
 
     const actualSec = await probeDurationSeconds(stitchedPath).catch(() => null);
     if (!actualSec || actualSec < totalSeconds - STITCH_TRUNCATE_TOLERANCE_SECONDS) {
@@ -198,21 +238,46 @@ export async function maybeStitchAndUpload(replay, sendStatus, { onlyIndices = n
 
     sendStatus?.('Uploading to YouTube');
     let uploadData;
-    try {
-      uploadData = await uploadToYouTube({
-        filePath: stitchedPath,
-        title: finalTitle,
-        description,
-        onProgress: ({ bytesRead, totalBytes }) => {
-          if (!totalBytes || !Number.isFinite(totalBytes)) return;
-          const percent = Math.min(100, Math.floor((bytesRead / totalBytes) * 100));
-          sendStatus?.(`Uploading to YouTube (${percent}%)`);
-        },
-      });
-    } catch (err) {
+    let lastUploadError = null;
+    for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        uploadData = await uploadToYouTube({
+          filePath: stitchedPath,
+          title: finalTitle,
+          description,
+          onProgress: ({ bytesRead, totalBytes }) => {
+            if (!totalBytes || !Number.isFinite(totalBytes)) return;
+            const percent = Math.min(100, Math.floor((bytesRead / totalBytes) * 100));
+            const suffix = attempt > 1 ? ` (retry ${attempt - 1})` : '';
+            sendStatus?.(`Uploading to YouTube (${percent}%)${suffix}`);
+          },
+        });
+        lastUploadError = null;
+        break;
+      } catch (err) {
+        lastUploadError = err;
+        const retriable = isRetriableUploadError(err);
+        await appendRunLog(
+          `YouTube upload attempt ${attempt}/${UPLOAD_MAX_ATTEMPTS} failed for ${stitchedPath}: ${err.message}` +
+            (retriable ? '' : ' (not retriable)'),
+          'youtube-upload-error',
+          []
+        );
+        if (!retriable || attempt === UPLOAD_MAX_ATTEMPTS) break;
+        const delayMs = UPLOAD_RETRY_BASE_MS * 2 ** (attempt - 1);
+        console.warn(
+          `YouTube upload failed (${err.message}); retrying in ${Math.round(delayMs / 1000)}s ` +
+            `(attempt ${attempt + 1}/${UPLOAD_MAX_ATTEMPTS})`
+        );
+        sendStatus?.(`Upload failed; retrying in ${Math.round(delayMs / 1000)}s`);
+        await sleep(delayMs);
+      }
+    }
+    if (lastUploadError) {
+      const err = lastUploadError;
       console.error(`YouTube upload failed: ${err.message}`);
       await appendRunLog(
-        `YouTube upload failed for ${stitchedPath}: ${err.message}`,
+        `YouTube upload failed for ${stitchedPath} after ${UPLOAD_MAX_ATTEMPTS} attempt(s): ${err.message}`,
         'youtube-upload-error',
         []
       );
