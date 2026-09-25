@@ -31,6 +31,31 @@ def parse_crf(value, fallback=None):
         return None
     return parse_int(value, fallback)
 
+_NVENC_OK = None
+
+
+def nvenc_available():
+    """True if hevc_nvenc can actually encode here.
+
+    USE_NVENC only expresses intent. If the GPU or driver is missing, the
+    encoder is still listed by `ffmpeg -encoders` but fails at open time, which
+    would fail every replay. Probe once with a trivial encode and cache it.
+    """
+    global _NVENC_OK
+    if _NVENC_OK is None:
+        try:
+            r = subprocess.run(
+                ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
+                 '-i', 'testsrc=size=320x240:rate=30:duration=1',
+                 '-c:v', 'hevc_nvenc', '-f', 'null', '-'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
+            )
+            _NVENC_OK = r.returncode == 0
+        except Exception:
+            _NVENC_OK = False
+    return _NVENC_OK
+
+
 def get_video_dimensions(video_path):
     """Get the width and height of the video using ffprobe."""
     print(f"Getting dimensions for video: {video_path}")
@@ -118,7 +143,13 @@ def overlay_text_on_video(video_path, overlay_image_path, output_video_path):
         # Ensure overlay matches source, then pad to even dimensions (yuv420p requirement)
         '-filter_complex', '[0:v][1:v]scale2ref[vid][ovr];[vid][ovr]overlay=format=auto:0:0,pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0',
     ]
-    if USE_NVENC:
+    if USE_NVENC and not nvenc_available():
+        print(
+            'USE_NVENC is set but hevc_nvenc is unavailable on this machine '
+            '(no CUDA device?); falling back to libx264.',
+            file=sys.stderr,
+        )
+    if USE_NVENC and nvenc_available():
         # AVI has no standard FOURCC for HEVC; without an explicit tag ffmpeg
         # writes codec_tag=0x0000 and readers misidentify the stream as rawvideo,
         # which then breaks the -c:v copy stitch step.
