@@ -11,10 +11,14 @@ import { spawnProcess, runChildProcess } from './childProc.js';
 import { getReadyForStitch, getBlockers, updateFlags } from './db.js';
 import { pad, convertIsoToMmDdYyyyHhMm } from './lib.js';
 import { buildYouTubeDescription } from './youtube_description.js';
-import { getDurationsSecondsFromFfprobe, probeDurationSeconds } from './ffprobe.js';
+import { getDurationsSecondsFromFfprobe, probeDurationSeconds, probeVideoCodec, countDecodeErrorsSampled } from './ffprobe.js';
 
 const LEAD_IN_FRAMES = 123;
 const STITCH_TRUNCATE_TOLERANCE_SECONDS = 60;
+// ffmpeg emits a benign non-monotonic-DTS line at the concat seam; real
+// corruption produces errors by the thousand, so a small allowance avoids
+// false positives without hiding anything that matters.
+const DECODE_ERROR_TOLERANCE = 10;
 
 // A stitched MKV represents hours of ffmpeg work, so a transient upload failure
 // (Google 5xx, socket reset, rate limit) should not throw the batch away and
@@ -149,6 +153,30 @@ export async function maybeStitchAndUpload(replay, sendStatus, { onlyIndices = n
       return false;
     }
 
+    // Every input must share a video codec. The concat demuxer with -c:v copy
+    // stamps the first input's codec onto the whole track, so mixing (e.g. an
+    // older libx264 batch with games re-recorded after USE_NVENC switched to
+    // hevc_nvenc) silently produces a file whose packets decode as garbage.
+    // Each AVI is individually valid and the duration checks all pass, so this
+    // is invisible until YouTube abandons processing.
+    const codecs = new Map();
+    for (const v of videoEntries) {
+      const codec = await probeVideoCodec(v.path).catch(() => null);
+      if (!codecs.has(codec)) codecs.set(codec, []);
+      codecs.get(codec).push(v.index);
+    }
+    if (codecs.size > 1 || codecs.has(null)) {
+      const summary = [...codecs.entries()]
+        .map(([c, idxs]) => `${c ?? 'unreadable'}: ${idxs.length} (e.g. ${idxs.slice(0, 3).join(', ')})`)
+        .join(' | ');
+      console.warn(`Stitch paused: source AVIs do not share one video codec -> ${summary}`);
+      await appendRunLog(
+        `Stitch paused: mixed source codecs -> ${summary}`,
+        'stitch-mixed-codec'
+      );
+      return false;
+    }
+
     const { startDate, endDate } = getDateRange(videoEntries);
     const safeStart = startDate.replace(/[\/:]/g, '-');
     const safeEnd = endDate.replace(/[\/:]/g, '-');
@@ -205,6 +233,20 @@ export async function maybeStitchAndUpload(replay, sendStatus, { onlyIndices = n
       );
       throw new Error(
         `Stitched MKV truncated: ${actualSec}s < expected ${totalSeconds}s (tolerance ${STITCH_TRUNCATE_TOLERANCE_SECONDS}s). Aborting upload.`
+      );
+    }
+
+    // Duration only proves the container is the right length; it says nothing
+    // about whether the frames decode. Sample a few windows before uploading.
+    const decodeErrors = await countDecodeErrorsSampled(stitchedPath, actualSec).catch(() => null);
+    if (decodeErrors != null && decodeErrors > DECODE_ERROR_TOLERANCE) {
+      await appendRunLog(
+        `Stitch produced undecodable video: ${decodeErrors} decode errors sampled in ${stitchedPath} — aborting upload`,
+        'stitch-undecodable',
+        [stitchedPath]
+      );
+      throw new Error(
+        `Stitched MKV fails decode sampling (${decodeErrors} errors). Aborting upload.`
       );
     }
 
