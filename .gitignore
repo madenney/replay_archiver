@@ -26,3 +26,7 @@ __pycache__
 notes.txt
 scripts/cleanup_delete_list.txt
 scripts/cleanup_keeplist_delete_list.txt
+
+# Transient cleanup/delete manifests — contain absolute host paths
+scripts/cleanup_delete_list_filtered.txt
+reports/cleanup_*_deleted.txt
