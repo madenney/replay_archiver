@@ -180,6 +180,8 @@ const PAGE = `<!DOCTYPE html>
   body{margin:0;background:var(--bg);color:var(--fg);
     font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;padding:0 16px 64px}
   .wrap{max-width:1000px;margin:0 auto}
+  .hdr{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
+  .hdr button{margin-top:18px;white-space:nowrap}
   h1{font-size:17px;margin:18px 0 2px;letter-spacing:-.01em}
   .sub{color:var(--muted);font-size:13px}
   .alert{margin:14px 0;padding:12px 14px;border-radius:9px;background:var(--dangerbg);
@@ -221,8 +223,13 @@ const PAGE = `<!DOCTYPE html>
 </style>
 </head>
 <body><div class="wrap">
-  <h1>Publish Archive — chronological rollout</h1>
-  <div class="sub">Publish strictly top to bottom. Never skip ahead — the order is permanent.</div>
+  <div class="hdr">
+    <div>
+      <h1>Publish Archive — chronological rollout</h1>
+      <div class="sub">Publish strictly top to bottom. Never skip ahead — the order is permanent.</div>
+    </div>
+    <button id="sweep" title="Re-read all 656 videos from YouTube and recheck ordering">Full verify (14 units)</button>
+  </div>
 
   <div id="violations"></div>
 
@@ -246,7 +253,6 @@ const PAGE = `<!DOCTYPE html>
     <span><b id="cleft">0</b> remaining</span>
     <span class="hide-sm"><b id="cunl">0</b> unlisted</span>
     <span class="hide-sm">quota used <b id="quota">0</b></span>
-    <span><button id="sweep">Full verify (14 units)</button></span>
   </div>
 
   <table>
