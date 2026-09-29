@@ -14,6 +14,7 @@ import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
 import http from 'http';
+import { spawn } from 'child_process';
 import { google } from 'googleapis';
 
 const OUTPUT_DIR = process.env.OUTPUT_DIR;
@@ -54,6 +55,20 @@ const ORDER = buildOrder();
 /** videoId -> { privacyStatus, publishedAt, checkedAt } */
 const LIVE = new Map();
 let quotaUsed = 0;
+
+// --- automatic publisher, driven from the UI -------------------------------
+// Spawns publish_sequential.js so the same verified-ordering logic runs whether
+// you publish from here or from the terminal.
+let scriptChild = null;
+let scriptLog = [];
+let scriptExit = null;
+function pushLog(chunk) {
+  for (const line of String(chunk).split(/\r?\n/)) {
+    if (line.trim()) scriptLog.push(line);
+  }
+  if (scriptLog.length > 800) scriptLog = scriptLog.slice(-800);
+}
+
 
 async function fetchMany(ids) {
   for (let i = 0; i < ids.length; i += 50) {
@@ -138,6 +153,38 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, snapshot());
     }
 
+    if (url.pathname === '/api/script/start' && req.method === 'POST') {
+      if (scriptChild) return send(res, 409, { error: 'already running' });
+      const limit = url.searchParams.get('limit');
+      const args = [path.join('scripts', 'publish_sequential.js'), '--go'];
+      if (limit && Number(limit) > 0) args.push('--limit', String(Number(limit)));
+      scriptLog = [`$ node ${args.join(' ')}`];
+      scriptExit = null;
+      scriptChild = spawn(process.execPath, args, { cwd: process.cwd(), env: process.env });
+      scriptChild.stdout.on('data', pushLog);
+      scriptChild.stderr.on('data', pushLog);
+      scriptChild.on('exit', (code) => {
+        pushLog(`--- script exited with code ${code} ---`);
+        scriptExit = code;
+        scriptChild = null;
+      });
+      return send(res, 200, { started: true });
+    }
+
+    if (url.pathname === '/api/script/stop' && req.method === 'POST') {
+      if (!scriptChild) return send(res, 200, { running: false });
+      scriptChild.kill('SIGINT'); // safe: state is written after every video
+      return send(res, 200, { stopping: true });
+    }
+
+    if (url.pathname === '/api/script/status') {
+      return send(res, 200, {
+        running: !!scriptChild,
+        exitCode: scriptExit,
+        log: scriptLog.slice(-200),
+      });
+    }
+
     send(res, 404, { error: 'not found' });
   } catch (err) {
     send(res, 500, { error: err.message });
@@ -216,6 +263,11 @@ const PAGE = `<!DOCTYPE html>
   tr.cur .pos{color:var(--accent);font-weight:700}
   tr.pub td{opacity:.55}
   .foot{margin-top:18px;color:var(--muted);font-size:12px}
+  button.danger{background:var(--danger);border-color:var(--danger);color:#fff}
+  button.danger:disabled{opacity:.45}
+  .log{background:#0b0c0f;color:#d6e0ea;border-radius:8px;padding:11px 13px;margin-top:12px;
+    max-height:280px;overflow:auto;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap}
+  .stats button{padding:4px 9px;font-weight:500}
   .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--line);
     border-top-color:var(--accent);border-radius:50%;animation:s .7s linear infinite;vertical-align:-2px}
   @keyframes s{to{transform:rotate(360deg)}}
@@ -247,12 +299,27 @@ const PAGE = `<!DOCTYPE html>
     </div>
   </div>
 
+  <div class="card" id="autocard">
+    <div class="lbl">Automatic publishing</div>
+    <div class="meta">Runs <code>publish_sequential.js</code> — same order, verifies every timestamp, stops on any fault.</div>
+    <div class="actions">
+      <label class="meta">how many:
+        <input id="limit" type="number" min="1" placeholder="all remaining" style="width:120px;padding:7px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)">
+      </label>
+      <button id="start" class="danger">Start publishing</button>
+      <button id="stop" disabled>Stop</button>
+      <span id="runstate" class="meta"></span>
+    </div>
+    <pre id="scriptlog" class="log" hidden></pre>
+  </div>
+
   <div class="bar"><div class="fill" id="fill"></div></div>
   <div class="stats">
     <span><b id="cpub">0</b> public</span>
     <span><b id="cleft">0</b> remaining</span>
     <span class="hide-sm"><b id="cunl">0</b> unlisted</span>
     <span class="hide-sm">quota used <b id="quota">0</b></span>
+    <span><button id="jump">Jump to current</button></span>
   </div>
 
   <table>
@@ -262,7 +329,7 @@ const PAGE = `<!DOCTYPE html>
   <div class="foot">Auto-check polls only the next video (1 quota unit each). Full verify sweeps all 656.</div>
 </div>
 <script>
-let state=null, timer=null, busy=false;
+let state=null, timer=null, busy=false, lastPos=null, autoScroll=true, logTimer=null;
 
 async function get(u){const r=await fetch(u);if(!r.ok)throw new Error((await r.json()).error||r.statusText);return r.json()}
 
@@ -299,11 +366,10 @@ function render(){
   }
 
   const tb=document.getElementById('tb');
-  const start=Math.max(0,(n?n.position-1:c.total)-3);
-  tb.innerHTML=state.rows.slice(start,start+40).map(r=>{
+  tb.innerHTML=state.rows.map(r=>{
     const cur=n&&r.position===n.position;
     const pub=r.privacy==='public';
-    return '<tr class="'+(cur?'cur':'')+(pub?' pub':'')+'">'+
+    return '<tr id="row'+r.position+'" class="'+(cur?'cur':'')+(pub?' pub':'')+'">'+
       '<td class="pos">'+r.position+'</td>'+
       '<td class="date">'+(r.firstDate||'').slice(0,10)+'</td>'+
       '<td>'+r.title+'</td>'+
@@ -311,6 +377,13 @@ function render(){
       '<td><span class="pill '+(r.privacy||'')+'">'+(r.privacy||'?')+'</span></td>'+
       '<td class="hide-sm ts">'+fmt(r.publishedAt)+'</td></tr>';
   }).join('');
+
+  // follow along as the current video advances, without fighting manual scrolling
+  if(n&&n.position!==lastPos){
+    lastPos=n.position;
+    const row=tb.querySelector('tr.cur');
+    if(row&&autoScroll)row.scrollIntoView({block:'center',behavior:'smooth'});
+  }
 }
 
 async function checkOne(){
@@ -334,11 +407,46 @@ function schedule(){
   }
 }
 
+async function pollScript(){
+  try{
+    const r=await get('/api/script/status');
+    const pre=document.getElementById('scriptlog');
+    const rs=document.getElementById('runstate');
+    if(r.log.length){pre.hidden=false;
+      const atBottom=pre.scrollTop+pre.clientHeight>=pre.scrollHeight-30;
+      pre.textContent=r.log.join('\\n');
+      if(atBottom)pre.scrollTop=pre.scrollHeight;}
+    document.getElementById('start').disabled=r.running;
+    document.getElementById('stop').disabled=!r.running;
+    rs.textContent=r.running?'running…':(r.exitCode===null?'':'stopped (exit '+r.exitCode+')');
+    if(r.running&&!logTimer)logTimer=setInterval(pollScript,1500);
+    if(!r.running&&logTimer){clearInterval(logTimer);logTimer=null;
+      state=await get('/api/sweep');render();}
+  }catch(e){}
+}
+
+document.getElementById('start').addEventListener('click',async function(){
+  const lim=document.getElementById('limit').value.trim();
+  const howMany=lim?lim:'ALL '+(state?state.counts.total-state.counts.public:'')+' remaining';
+  const typed=prompt('This publishes '+howMany+' video(s) PERMANENTLY, in chronological order.\\n\\n'+
+    'Publish dates cannot be changed afterwards.\\n\\nType PUBLISH to confirm:');
+  if(typed!=='PUBLISH')return;
+  await fetch('/api/script/start'+(lim?'?limit='+encodeURIComponent(lim):''),{method:'POST'});
+  pollScript();
+});
+document.getElementById('stop').addEventListener('click',async function(){
+  await fetch('/api/script/stop',{method:'POST'});pollScript();
+});
+document.getElementById('jump').addEventListener('click',function(){
+  const row=document.querySelector('tr.cur');
+  if(row)row.scrollIntoView({block:'center',behavior:'smooth'});
+});
+
 document.getElementById('checknow').addEventListener('click',checkOne);
 document.getElementById('sweep').addEventListener('click',sweep);
 document.getElementById('auto').addEventListener('change',schedule);
 document.getElementById('interval').addEventListener('change',schedule);
 
-get('/api/state').then(s=>{state=s;render();schedule()});
+get('/api/state').then(s=>{state=s;render();schedule();pollScript()});
 </script>
 </body></html>`;
