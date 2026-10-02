@@ -167,12 +167,25 @@ async function main() {
       before = await readVideo(yt, v.videoId);
       if (!before) throw new Error('could not read video before publishing');
       if (before.status.privacyStatus === 'public') {
-        log(`  #${v.position} already public — recording and continuing`);
+        // Already public -- published manually, or by an earlier run. Its order
+        // still has to hold: accepting it blindly would let an out-of-order
+        // video through silently, which is the one failure we cannot undo.
+        const alreadyAt = new Date(before.snippet.publishedAt);
+        if (prevAt && alreadyAt <= prevAt) {
+          log(`\nSTOPPED — ORDER VIOLATION at #${v.position} ${v.videoId} (was already public)`);
+          log(`  this publishedAt : ${alreadyAt.toISOString()}`);
+          log(`  previous         : ${prevAt.toISOString()}`);
+          log('  This video was published out of order before this run.');
+          log('  Everything after it is untouched. Investigate before resuming.');
+          saveState(state);
+          process.exit(3);
+        }
+        log(`  · #${String(v.position).padStart(3)}/${order.length} already public, in order — recording`);
         state.published[v.videoId] = { publishedAt: before.snippet.publishedAt, position: v.position };
         state.lastPublishedAt = before.snippet.publishedAt;
         state.lastPosition = v.position;
         saveState(state);
-        prevAt = new Date(before.snippet.publishedAt);
+        prevAt = alreadyAt;
         continue;
       }
       const s = before.status;
