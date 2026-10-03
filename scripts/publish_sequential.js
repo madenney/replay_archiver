@@ -164,6 +164,22 @@ async function main() {
     // Flip to public, preserving every other status field.
     let before;
     try {
+      // Videos we published ourselves were verified at the time and their
+      // publishedAt is recorded. Re-reading them costs a quota unit each and
+      // grows with every run, so trust the record and only verify order.
+      const known = state.published[v.videoId];
+      if (known?.publishedAt) {
+        const knownAt = new Date(known.publishedAt);
+        if (prevAt && knownAt <= prevAt) {
+          log(`\nSTOPPED — ORDER VIOLATION at #${v.position} ${v.videoId} (from recorded state)`);
+          log(`  this publishedAt : ${knownAt.toISOString()}`);
+          log(`  previous         : ${prevAt.toISOString()}`);
+          saveState(state);
+          process.exit(3);
+        }
+        prevAt = knownAt;
+        continue;
+      }
       before = await readVideo(yt, v.videoId);
       if (!before) throw new Error('could not read video before publishing');
       if (before.status.privacyStatus === 'public') {
