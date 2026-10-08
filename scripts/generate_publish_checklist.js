@@ -109,7 +109,7 @@ const html = `<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <h1>Publish Checklist — Archive</h1>
+  <h1>Publish Checklist — ${process.env.ARCHIVE_TITLE || 'Archive'}</h1>
   <div class="sub">${order.length} videos in verified chronological order. Work top to bottom; never skip ahead.</div>
   <div class="bar"><div class="fill" id="fill"></div></div>
   <div class="stats">

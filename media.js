@@ -366,19 +366,25 @@ function extractPlayerCode(player) {
   return names.code || ''
 }
 
-function hasArchivePlayerMatch(playerInfo) {
+// Does any player match the archive owner, per ARCHIVE_PLAYER_CODES /
+// ARCHIVE_PLAYER_TAGS? With neither configured this is always false and the
+// owner-specific overlay handling is simply skipped.
+function matchesArchivePlayer(playerInfo) {
   if (!Array.isArray(playerInfo) || playerInfo.length === 0) return false
+  const codes = config.archivePlayerCodes
+  const tags = config.archivePlayerTags
+  if (!codes.length && !tags.length) return false
   return playerInfo.some((p) => {
-    const code = String(p?.code || '')
-    if (code === 'CODE1' || code === 'CODE2') return true
+    const code = String(p?.code || '').toUpperCase()
+    if (codes.includes(code)) return true
     const tag = String(p?.tag || '').toLowerCase()
-    return tag.includes('own') || tag.includes('tag1')
+    return tags.some((t) => tag.includes(t))
   })
 }
 
 async function getArchivePlayerFoxColor(replay, playerInfo) {
   if (typeof replay.index !== 'number' || replay.index >= config.slippiUpdate) return null
-  if (!hasArchivePlayerMatch(playerInfo)) return null
+  if (!matchesArchivePlayer(playerInfo)) return null
 
   const SlippiGame = await loadSlippiGame()
   const game = new SlippiGame(replay.file_path)
@@ -393,11 +399,12 @@ async function getArchivePlayerFoxColor(replay, playerInfo) {
   const foxId = slippi.Character?.FOX ?? 2
   if (sorted[0]?.characterId !== foxId || sorted[1]?.characterId !== foxId) return null
 
+  const ownCodes = config.archivePlayerCodes
   const ownIndex = sorted.findIndex((p, idx) => {
-    const connectCode = String(p?.connectCode || '')
-    if (connectCode === 'CODE1' || connectCode === 'CODE2') return true
-    const fallbackCode = String(playerInfo?.[idx]?.code || '')
-    return fallbackCode === 'CODE1' || fallbackCode === 'CODE2'
+    const connectCode = String(p?.connectCode || '').toUpperCase()
+    if (ownCodes.includes(connectCode)) return true
+    const fallbackCode = String(playerInfo?.[idx]?.code || '').toUpperCase()
+    return ownCodes.includes(fallbackCode)
   })
   if (ownIndex === -1) return null
 

@@ -153,15 +153,20 @@ def get_manifest_date_range_text(manifest: dict) -> str:
     return start_text if start_text == end_text else f"{start_text} - {end_text}"
 
 
-def is_own_player(tag: Optional[str], code: Optional[str]) -> bool:
+# The archive owner's own player, so reports can name the opponent instead.
+OWN_CODES = [c.strip().upper() for c in os.environ.get("ARCHIVE_PLAYER_CODES", "").split(",") if c.strip()]
+OWN_TAGS = [t.strip().lower() for t in os.environ.get("ARCHIVE_PLAYER_TAGS", "").split(",") if t.strip()]
+
+
+def is_archive_player(tag: Optional[str], code: Optional[str]) -> bool:
     code_value = str(code or "")
-    if code_value in ("CODE1", "CODE2"):
+    if code_value.upper() in OWN_CODES:
         return True
     tag_value = str(tag or "").lower()
-    return "own" in tag_value or "tag1" in tag_value
+    return any(t in tag_value for t in OWN_TAGS)
 
 
-def get_non_own_player(game: dict) -> Optional[dict]:
+def get_opponent(game: dict) -> Optional[dict]:
     players = game.get("players") if isinstance(game.get("players"), list) else []
     codes = game.get("codes") if isinstance(game.get("codes"), list) else []
     total = max(len(players), len(codes))
@@ -173,13 +178,13 @@ def get_non_own_player(game: dict) -> Optional[dict]:
         code = codes[idx] if idx < len(codes) else ""
         entries.append({"tag": tag, "code": code})
 
-    own_indices = [idx for idx, entry in enumerate(entries) if is_own_player(entry["tag"], entry["code"])]
+    own_indices = [idx for idx, entry in enumerate(entries) if is_archive_player(entry["tag"], entry["code"])]
     if len(own_indices) == 1:
         for idx, entry in enumerate(entries):
             if idx != own_indices[0]:
                 return entry
     for entry in entries:
-        if not is_own_player(entry["tag"], entry["code"]):
+        if not is_archive_player(entry["tag"], entry["code"]):
             return entry
     return entries[0]
 
@@ -341,7 +346,7 @@ def main() -> None:
             TableStyle = RLTableStyle
             styles = getSampleStyleSheet()
             story = []
-            story.append(Paragraph("Archive Index", styles["Title"]))
+            story.append(Paragraph(f'{os.environ.get("ARCHIVE_TITLE", "Archive")} Index', styles["Title"]))
             story.append(Spacer(1, 12))
             pdf_doc = SimpleDocTemplate(pdf_path, pagesize=letter)
             header_style = ParagraphStyle(
@@ -388,7 +393,7 @@ def main() -> None:
 
     markdown_lines: List[str] = []
     if should_write_markdown:
-        markdown_lines.append("# Archive Index")
+        markdown_lines.append(f'# {os.environ.get("ARCHIVE_TITLE", "Archive")} Index')
         markdown_lines.append("")
 
     total_missing = 0
@@ -471,7 +476,7 @@ def main() -> None:
             game = games[game_index] if game_index < len(games) else {}
             if not isinstance(game, dict):
                 game = {}
-            player_label = format_player_label(get_non_own_player(game))
+            player_label = format_player_label(get_opponent(game))
             label = indices[game_index] if game_index < len(indices) else game_index + 1
             label_text = label if isinstance(label, (int, float, str)) and str(label).strip() else game_index + 1
             timestamp_seconds = max(

@@ -81,7 +81,7 @@ async function main() {
 
   // Title
   doc.fontSize(24);
-  drawText(doc, 'Archive - Upload Order Report', 40, 40);
+  drawText(doc, `${process.env.ARCHIVE_TITLE || 'Archive'} - Upload Order Report`, 40, 40);
   doc.fontSize(11).fillColor('#555');
   drawText(doc, `Generated ${new Date().toISOString().slice(0, 10)}  |  ${uploads.length} videos  |  ${outOfOrderIds.size} out of order`, 40, 72);
   doc.fontSize(9).fillColor('#888');

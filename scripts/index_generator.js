@@ -6,6 +6,10 @@ import { spawn } from 'child_process';
 import { getDurationsSecondsFromFfprobe } from '../ffprobe.js';
 import { pad } from '../lib.js';
 
+// The archive owner's own player, so reports can name the opponent instead.
+const OWN_CODES = (process.env.ARCHIVE_PLAYER_CODES || '').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean);
+const OWN_TAGS = (process.env.ARCHIVE_PLAYER_TAGS || '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+
 const LEAD_IN_FRAMES = 123;
 const MANIFEST_SUFFIX = '.manifest.json';
 const TIMESTAMP_BUFFER_SECONDS = 0.5;
@@ -99,12 +103,12 @@ function getManifestDateRangeText(manifest) {
 
 function isArchivePlayer(tag, code) {
   const codeValue = String(code || '');
-  if (codeValue === 'CODE1' || codeValue === 'CODE2') return true;
+  if (OWN_CODES.includes(codeValue.toUpperCase())) return true;
   const tagValue = String(tag || '').toLowerCase();
-  return tagValue.includes('own') || tagValue.includes('tag1');
+  return OWN_TAGS.some((t) => tagValue.includes(t));
 }
 
-function getNonArchivePlayer(game) {
+function getOpponent(game) {
   const players = Array.isArray(game?.players) ? game.players : [];
   const codes = Array.isArray(game?.codes) ? game.codes : [];
   const total = Math.max(players.length, codes.length);
@@ -119,8 +123,8 @@ function getNonArchivePlayer(game) {
   if (ownIndices.length === 1) {
     return entries.find((_, idx) => idx !== ownIndices[0]) || entries[0];
   }
-  const nonArchive = entries.find((entry) => !isArchivePlayer(entry.tag, entry.code));
-  return nonArchive || entries[0];
+  const opponent = entries.find((entry) => !isArchivePlayer(entry.tag, entry.code));
+  return opponent || entries[0];
 }
 
 function formatPlayerLabel(entry) {
@@ -270,7 +274,7 @@ async function main() {
   await fsPromises.mkdir(tmpDir, { recursive: true });
   const stream = fs.createWriteStream(markdownPath, { encoding: 'utf8' });
 
-  await writeLine(stream, '# Archive Index');
+  await writeLine(stream, `# ${process.env.ARCHIVE_TITLE || 'Archive'} Index`);
   await writeLine(stream, '');
 
   for (let i = 0; i < manifestEntries.length; i += 1) {
@@ -337,7 +341,7 @@ async function main() {
       let elapsedSeconds = 0;
       for (let idx = 0; idx < durationsSeconds.length; idx += 1) {
         const game = games[idx] && typeof games[idx] === 'object' ? games[idx] : {};
-        const playerLabel = formatPlayerLabel(getNonArchivePlayer(game));
+        const playerLabel = formatPlayerLabel(getOpponent(game));
         const label = indices[idx];
         const labelText =
           (typeof label === 'number' && Number.isFinite(label)) ||
