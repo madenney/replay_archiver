@@ -30,3 +30,13 @@ scripts/cleanup_keeplist_delete_list.txt
 # Transient cleanup/delete manifests — contain absolute host paths
 scripts/cleanup_delete_list_filtered.txt
 reports/cleanup_*_deleted.txt
+
+# Publishing rollout artifacts (regenerable; contain video ids / host paths)
+manifest_backups_2026-10-07/
+reports/publish_checklist.html
+reports/publish_plan.json
+reports/publish_behavior_test.json
+reports/publish_test_unlisted_origin.json
+reports/publish_sequential_state.json
+reports/publish_sequential.log
+reports/publish_watchdog.log
