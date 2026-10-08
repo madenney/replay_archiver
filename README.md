@@ -50,6 +50,10 @@ The tooling below is general and can be pointed at another replay set.
    - `QUALITY`, `BITRATE_KBPS`, `FFMPEG_CRF`, `FFMPEG_MAXRATE_KBPS`,
      `FFMPEG_BUFSIZE_KBPS`, `FFMPEG_PRESET`, `FFMPEG_PROFILE` — encoder tuning
    - `STITCH_TIMEOUT_MS`, `CLAIM_TTL_MS`, `MAX_REPLAY_ERRORS`, `KEEP_TEMP_FILES`
+   - `SLIPPI_UPDATE` (default `7950`) — replay index before which the overlay derives
+     the owner's Fox costume colour from the replay's settings. Older replays predate the
+     Slippi version that recorded it; above this index the lookup is skipped. Only
+     relevant to this specific archive.
    - `YOUTUBE_PRIVACY` (default `unlisted`), `YOUTUBE_MADE_FOR_KIDS`
 
 3. `overlay.py` resolves its font relative to itself (`cour_bold.ttf`), so no extra
