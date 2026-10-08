@@ -17,7 +17,11 @@ import path from 'path';
 
 const OUTPUT_DIR = process.env.OUTPUT_DIR;
 const FINAL_DIR = process.env.FINAL_DIR || path.join(OUTPUT_DIR || '', 'final');
-const CHANNEL_ID = process.env.YOUTUBE_CHANNEL_ID || 'CHANNEL_ID';
+const CHANNEL_ID = process.env.YOUTUBE_CHANNEL_ID;
+if (!CHANNEL_ID) {
+  console.error('YOUTUBE_CHANNEL_ID is required (the channel whose RSS feed to read).');
+  process.exit(1);
+}
 
 function buildOrder() {
   const vids = [];

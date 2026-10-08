@@ -8,7 +8,7 @@ A pipeline that turns Slippi Melee `.slp` replays into overlaid videos, concaten
 
 All state lives in a shared **Postgres** `replays` table (see `db.js`); `replays.json` in the repo root is a leftover from an earlier design and is unused.
 
-**Status:** the Archive run is complete — 126,443 replays into 656 videos, all published publicly in chronological order. The pipeline and publishing tooling are general and can be pointed at another replay set.
+**Status:** run to completion once at ~126k replays / 656 videos, all published in chronological order. `ARCHIVE_PLAYER_CODES` / `ARCHIVE_PLAYER_TAGS` identify the archive owner's own player; with them unset that handling is skipped.
 
 ## Commands
 

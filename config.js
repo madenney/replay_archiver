@@ -96,6 +96,18 @@ export const config = {
   // indefinitely.
   maxReplayErrors: parseNumberEnv('MAX_REPLAY_ERRORS', 3),
   slippiUpdate: parseNumberEnv('SLIPPI_UPDATE', 7950),
+  // The archive owner's own player, used to tell them apart from opponents in
+  // overlays and index reports. Comma-separated; matched case-insensitively,
+  // codes exactly and tags as substrings.
+  archivePlayerCodes: (process.env.ARCHIVE_PLAYER_CODES || '')
+    .split(',')
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean),
+  archivePlayerTags: (process.env.ARCHIVE_PLAYER_TAGS || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean),
+  youtubeChannelId: process.env.YOUTUBE_CHANNEL_ID || null,
   // Base directory for replay files (set per machine)
   replayDirectory: process.env.REPLAY_DIRECTORY,
   // Optional: prefix stored in DB file paths to swap with replayDirectory

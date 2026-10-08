@@ -4,10 +4,9 @@ A pipeline that turns Slippi Melee replays into rendered videos with a text over
 concatenates them into multi-hour archive videos, and uploads them to YouTube in
 chronological order.
 
-**Status: the Archive run is complete.** 126,443 replays were archived into 656
-videos (~5,250 hours), all published publicly in strict chronological order
-(Nov 2020 – Mar 2025). 720 replays were skipped, almost all zero-frame games.
-The tooling below is general and can be pointed at another replay set.
+It has been run to completion once on a large collection (~126k replays into 656
+videos), so the pipeline and publishing tooling are shaped by real use at that
+scale rather than theory.
 
 ### Requirements
 
@@ -51,10 +50,13 @@ The tooling below is general and can be pointed at another replay set.
      `FFMPEG_BUFSIZE_KBPS`, `FFMPEG_PRESET`, `FFMPEG_PROFILE` — encoder tuning
    - `STITCH_TIMEOUT_MS`, `CLAIM_TTL_MS`, `MAX_REPLAY_ERRORS`, `KEEP_TEMP_FILES`
    - `SLIPPI_UPDATE` (default `7950`) — replay index before which the overlay derives
-     the owner's Fox costume colour from the replay's settings. Older replays predate the
-     Slippi version that recorded it; above this index the lookup is skipped. Only
-     relevant to this specific archive.
+     the archive owner's Fox costume colour from the replay's settings. Older replays predate the
+     Slippi version that recorded it; above this index the lookup is skipped.
    - `YOUTUBE_PRIVACY` (default `unlisted`), `YOUTUBE_MADE_FOR_KIDS`
+   - `YOUTUBE_CHANNEL_ID` — required by `verify_recent_rss.js` to read the channel feed
+   - `ARCHIVE_PLAYER_CODES` / `ARCHIVE_PLAYER_TAGS` — comma-separated connect codes and
+     tag substrings identifying the archive owner's own player, so overlays and index
+     reports can tell them apart from opponents. Leave unset to skip that handling.
 
 3. `overlay.py` resolves its font relative to itself (`cour_bold.ttf`), so no extra
    configuration is needed.

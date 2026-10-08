@@ -40,3 +40,10 @@ reports/publish_test_unlisted_origin.json
 reports/publish_sequential_state.json
 reports/publish_sequential.log
 reports/publish_watchdog.log
+
+# Archive data — identifying; kept outside the repo
+manifest_backups/
+manifest_backups_*/
+backup/
+reports/
+db_backup
