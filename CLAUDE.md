@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A pipeline that turns Slippi Melee `.slp` replays into overlaid videos, concatenates them into long MKVs, and uploads those to YouTube. Plain ESM Node.js (`"type": "module"`) plus one Python script (`overlay.py`). There are no tests and no linter; verification is running the pipeline against real data.
 
-The README's "Usage" section is stale — it still describes a `replays.json` flow. All state now lives in a shared **Postgres** `replays` table (see `db.js`); `replays.json` in the repo root is a leftover.
+All state lives in a shared **Postgres** `replays` table (see `db.js`); `replays.json` in the repo root is a leftover from an earlier design and is unused.
+
+**Status:** the Archive run is complete — 126,443 replays into 656 videos, all published publicly in chronological order. The pipeline and publishing tooling are general and can be pointed at another replay set.
 
 ## Commands
 
@@ -84,6 +86,26 @@ Two worker machines share the DB and an NFS `OUTPUT_DIR`. Settings that differ p
 - `OUTPUT_DIR/run.log` — `appendRunLog()`; every subprocess invocation with its full argv, plus stitch-pause reasons.
 - `OUTPUT_DIR/uploads.json` — one entry per successful upload.
 - `childProc.js` spawns children `detached` in their own process group so `killTree()` can kill an AppImage wrapper *and* the inner Dolphin/ffmpeg on timeout.
+
+### Publishing (scripts/publish_*, scripts/verify_*)
+
+Uploads default to `unlisted`. Flipping a video public writes a **permanent**
+`publishedAt` and the channel sorts by it forever, so publish order is a one-shot,
+irreversible operation.
+
+`publish_sequential.js` is the tool for it: publish one video, read `publishedAt`
+back, and refuse to continue unless it is strictly later than the previous one. It
+halts on any anomaly with everything after it untouched, and resumes from
+`reports/publish_sequential_state.json`. `audit_publish_readiness.js` derives the
+chronological order four independent ways — manifest indices, Postgres dates, `.slp`
+filename timestamps, and manifest `startDate` strings — and refuses to proceed if
+they disagree.
+
+Quota is the binding constraint: `videos.update` costs 50 units against a default
+10,000/day (~195 videos), resetting midnight Pacific. `verify_recent_rss.js` checks
+recent publish order via the channel RSS feed at **no quota cost**, which is what
+makes verification possible once the budget is spent. Do not leave `publish_ui.js`
+running during a publish run — its page polls YouTube and will consume the budget.
 
 ### scripts/
 
