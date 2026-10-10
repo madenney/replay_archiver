@@ -19,10 +19,9 @@ import {
 } from './db.js';
 import { config } from './config.js';
 import { appendRunLog, fileExists } from './util_log.js';
-import { runChildProcess, killDolphinOnEndFrame } from './childProc.js';
+import { runChildProcess } from './childProc.js';
 import {
-  configureDolphin,
-  generateDolphinConfig,
+  prepareDolphin,
   runDolphin,
   mergeVideo,
   addOverlay,
@@ -213,8 +212,10 @@ export async function record(options = {}) {
     if (!stitchWorkerEnabled) {
         console.log('Mode: record/merge/overlay only (stitch/upload disabled for this run).');
     }
-    // Configure Dolphin settings once before processing replays
-    await configureDolphin();
+    // Validate Dolphin once, and undo any framedump settings an older version
+    // of this pipeline wrote into the operator's real profile. The per-worker
+    // throwaway profiles are built lazily inside each worker.
+    await prepareDolphin();
 
     if (testReplayIndex !== null && testReplayIndex !== undefined) {
         await processSingleReplay(testReplayIndex, { stitchWorkerEnabled });
@@ -946,11 +947,8 @@ if (!isMainThread) {
 
                 sendStatus('Starting');
 
-                sendStatus('Generating Config');
-                await generateDolphinConfig(replay);
-
                 sendStatus('Running Dolphin');
-                await runDolphin(replay);
+                await runDolphin(replay, workerId);
 
                 sendStatus('Merging Video');
                 await mergeVideo(replay);

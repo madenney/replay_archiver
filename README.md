@@ -30,6 +30,7 @@ scale rather than theory.
    | `REPLAY_DIRECTORY` | root of the `.slp` files on *this* machine |
    | `SSBM_ISO_PATH`, `DOLPHIN_PATH` | Melee ISO and Slippi Playback binary |
    | `NUM_WORKERS` | worker-thread count (one slot becomes the stitcher in full mode) |
+   | `QUALITY` | Dolphin's `EFBScale`. An **enum, not a multiplier**: 2 = 1x native, 3 = 1.5x, 4 = 2x, 5 = 2.5x, 6 = 3x, 7 = 4x. Required, because a recording that inherits this from whatever the operator last played at can silently dump at 4x — one such run produced a 25 GB AVI at ~4 fps for a 75-second game |
    | `DOLPHIN_TIMEOUT_MS`, `FFMPEG_TIMEOUT_MS`, `OVERLAY_TIMEOUT_MS` | per-step timeouts |
    | `STITCH_MIN_TOTAL_MINUTES` | minimum length before a batch is stitched (e.g. `480`) |
    | `ARCHIVE_TITLE` | title prefix for stitched videos |
@@ -46,8 +47,12 @@ scale rather than theory.
      atomically, which greatly reduces NFS traffic.
    - `USE_NVENC=1` — encode the overlay with `hevc_nvenc`. `overlay.py` probes the
      encoder once and falls back to libx264 if no GPU is available.
-   - `QUALITY`, `BITRATE_KBPS`, `FFMPEG_CRF`, `FFMPEG_MAXRATE_KBPS`,
-     `FFMPEG_BUFSIZE_KBPS`, `FFMPEG_PRESET`, `FFMPEG_PROFILE` — encoder tuning
+   - `BITRATE_KBPS`, `FFMPEG_CRF`, `FFMPEG_MAXRATE_KBPS`, `FFMPEG_BUFSIZE_KBPS`,
+     `FFMPEG_PRESET`, `FFMPEG_PROFILE` — encoder tuning
+   - `DUMP_CODEC` — **the recording speed lever. See below.**
+   - `EMULATION_SPEED` — `[Core] EmulationSpeed`; `0` = unlimited
+   - `DOLPHIN_PROFILE_DIR` — where per-worker throwaway Dolphin profiles are
+     built (default `$TMPDIR/replay_archiver_dolphin`). Keep it on local disk
    - `STITCH_TIMEOUT_MS`, `CLAIM_TTL_MS`, `MAX_REPLAY_ERRORS`, `KEEP_TEMP_FILES`
    - `SLIPPI_UPDATE` (default `7950`) — replay index before which the overlay derives
      the archive owner's Fox costume colour from the replay's settings. Older replays predate the
@@ -104,6 +109,31 @@ the threshold on its own:
 node scripts/finish_tail.js --dry-run
 node scripts/finish_tail.js
 ```
+
+### Recording speed — `DUMP_CODEC`
+
+Dolphin encodes the frame dump **on a single thread, and that thread is the
+recording speed limit**. For a bulk archive this is the difference between a
+run that takes a day and one that takes a week, so it is worth setting
+deliberately rather than inheriting.
+
+Measured, at `QUALITY=6` (3x) unless noted:
+
+| `DUMP_CODEC` | speed | quality | notes |
+|---|---|---|---|
+| `ffv1` | **0.10x** realtime (~12 min per game) | lossless | 0.77x at native resolution, where it is the only option |
+| `utvideo` | **0.81x** — about **8x faster** than ffv1 | bit-exact | ~12 GB per 75 s game. Needs an even dump width, so it is **refused at `QUALITY=2`** (native is 939 px wide) |
+| `mpeg4` | **3.0–3.6x** with `EMULATION_SPEED=0` | lossy, about −6 dB | |
+| `h264` | — | — | **refused**: Dolphin drops the last ~52 frames when the dump is closed |
+| unset | — | — | inherits the Dolphin profile's own setting (what this pipeline did before) |
+
+`EMULATION_SPEED=0` is bit-identical output where it applies, and only helps
+when the encoder is *not* the bottleneck — so it is worth pairing with `mpeg4`,
+and pointless with `ffv1` at a high `QUALITY`.
+
+Parallelism is the other lever and it compounds: three concurrent `utvideo`
+workers measured **2.07x aggregate**. Weigh that against disk, since the
+intermediates are large and transient.
 
 ### Publishing
 
