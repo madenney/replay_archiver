@@ -14,7 +14,8 @@
     "googleapis": "^166.0.0",
     "pdfkit": "^0.18.0",
     "pg": "^8.11.3",
-    "proper-lockfile": "^4.1.2"
+    "proper-lockfile": "^4.1.2",
+    "slippi-dolphin-runner": "github:madenney/dolphin_runner#v0.5.1"
   },
   "author": "",
   "license": "ISC",

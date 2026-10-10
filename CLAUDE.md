@@ -38,13 +38,13 @@ During a run, `q` requests a graceful shutdown (finish in-flight replays); Ctrl+
 
 For each replay, a normal worker runs, all in `config.workingGamesDir`, with files named by 6-digit zero-padded idx (`pad(idx, 6)`):
 
-1. `generateDolphinConfig` → `NNNNNN.json`
-2. `runDolphin` → `NNNNNN-unmerged.avi` + `.wav` (Slippi Playback Dolphin, headless). Duration is ffprobe-verified against `game_length_frames`; a short recording throws.
-3. `mergeVideo` → `NNNNNN-merged.avi` (ffmpeg, `-c:v copy`, just muxes audio)
-4. `addOverlay` → `NNNNNN.avi` via `python3 overlay.py` — **the only lossy encode** (libx264, or `hevc_nvenc` when `USE_NVENC` is set)
-5. `publishOverlay` → atomically copies the final `.avi` into `config.gamesDir` (no-op unless `SCRATCH_DIR` set)
-6. `recorded=1, overlaid=1, stitch_pending=1` are set **together, only after** step 5 — a crash before that leaves the DB at 0/0 so the next worker redoes everything.
-7. `deleteFiles` removes intermediates (kept if `KEEP_TEMP_FILES=true`).
+1. `runDolphin` → `NNNNNN-unmerged.avi` + `.wav`, via `slippi-dolphin-runner`'s `record()`. The package owns the spawn, the `--cout` frame parsing, the stall watchdog and the process-tree kill; this repo keeps the ffprobe duration guard, which is what actually judges the footage. A stall resolves with `stalled: true` rather than throwing — measured dumps at the moment of a stall have been 27%–94% complete, so the duration check decides, not the watchdog.
+   Each worker gets its own throwaway `--user` profile from `ensureWorkerProfile(workerId)`; sharing one would make concurrent Dolphins silently overwrite each other's frames. `commPath` is per-replay for the same reason. `endFrame` is `game_length_frames - 1`, which is what makes the dump exactly `game_length_frames + 123` frames.
+2. `mergeVideo` → `NNNNNN-merged.avi` (ffmpeg, `-c:v copy`, just muxes audio)
+3. `addOverlay` → `NNNNNN.avi` via `python3 overlay.py` — **the only lossy encode** (libx264, or `hevc_nvenc` when `USE_NVENC` is set)
+4. `publishOverlay` → atomically copies the final `.avi` into `config.gamesDir` (no-op unless `SCRATCH_DIR` set)
+5. `recorded=1, overlaid=1, stitch_pending=1` are set **together, only after** step 4 — a crash before that leaves the DB at 0/0 so the next worker redoes everything.
+6. `deleteFiles` removes intermediates (kept if `KEEP_TEMP_FILES=true`).
 
 Any throw → `recordReplayError()` increments `error_count`, releases the claim, and auto-sets `skip=1` at `MAX_REPLAY_ERRORS` (default 3).
 
@@ -79,13 +79,13 @@ Two worker machines share the DB and an NFS `OUTPUT_DIR`. Settings that differ p
 - `USE_NVENC`: GPU overlay encode (only on the machine with the NVIDIA card).
 - `NUM_WORKERS`: in a full run one slot is the stitcher, so record parallelism is `NUM_WORKERS - 1`.
 
-`configureDolphin()` rewrites `~/.config/SlippiPlayback/{GameSettings/GALE01.ini,Config/GFX.ini,Config/Dolphin.ini}` on every run — Dolphin settings changes belong there, not in the ini files.
+Dolphin settings are built per worker by `ensureWorkerProfile()` in `media.js` via the runner's `buildProfile()`; the operator's real profile is never written. `prepareDolphin()` runs `healRealProfile()` once at startup to undo damage from the older in-place version of this pipeline. `DUMP_CODEC` is the recording speed lever and is documented in the README — Dolphin encodes on one thread, so it is worth 8x.
 
 ### Logs
 
 - `OUTPUT_DIR/run.log` — `appendRunLog()`; every subprocess invocation with its full argv, plus stitch-pause reasons.
 - `OUTPUT_DIR/uploads.json` — one entry per successful upload.
-- `childProc.js` spawns children `detached` in their own process group so `killTree()` can kill an AppImage wrapper *and* the inner Dolphin/ffmpeg on timeout.
+- `childProc.js` is now only ffmpeg and overlay.py. Dolphin's spawn, stdout parsing, watchdog and tree-kill all live in `slippi-dolphin-runner`; the file's header records which bugs the deleted local copies had (a `line.includes` end-frame match where 845 matched inside 8454, a CRLF-only split, and a process-group kill that missed the AppImage's inner binary).
 
 ### Publishing (scripts/publish_*, scripts/verify_*)
 

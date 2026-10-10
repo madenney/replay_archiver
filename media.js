@@ -1,11 +1,9 @@
 import path from 'path'
 import fs from 'fs'
-import os from 'os'
-import readline from 'readline'
-import crypto from 'crypto'
 import { promises as fsPromises } from 'fs'
 import { createRequire } from 'module'
-import { spawnProcess, runChildProcess, killDolphinOnEndFrame } from './childProc.js'
+import { spawnProcess, runChildProcess } from './childProc.js'
+import { buildProfile, record, dolphinStatus, healRealProfile } from 'slippi-dolphin-runner'
 import { config } from './config.js'
 import { appendRunLog } from './util_log.js'
 import { pad, convertIsoToMmDdYyyyHhMm } from './lib.js'
@@ -22,143 +20,128 @@ const DOLPHIN_FPS = 60
 // instead of letting the truncation propagate through overlay -> stitch.
 const DOLPHIN_DURATION_TOLERANCE_SECONDS = 5
 
-export async function configureDolphin() {
-  const { bitrateKbps, quality } = config
-  const dolphinDirname = path.join(os.homedir(), '.config', 'SlippiPlayback')
-  const gameSettingsPath = path.join(dolphinDirname, 'GameSettings', 'GALE01.ini')
-  const graphicsSettingsPath = path.join(dolphinDirname, 'Config', 'GFX.ini')
-  const dolphinSettingsPath = path.join(dolphinDirname, 'Config', 'Dolphin.ini')
+// The Gecko codes this archive records with. Written into each throwaway
+// profile's GameSettings/GALE01.ini, never the operator's own.
+const GECKO_INI = [
+  '[Gecko]',
+  '[Gecko_Enabled]',
+  '$Optional: Game Music OFF',
+  '$Optional: Widescreen 16:9',
+  '[Gecko_Disabled]',
+  '$Optional: Show Player Names',
+].join('\n')
 
-  await fsPromises.mkdir(path.dirname(gameSettingsPath), { recursive: true })
-  if (!fs.existsSync(gameSettingsPath)) {
-    const fd = await fsPromises.open(gameSettingsPath, 'a')
-    await fd.close()
-  }
+const ASPECT_RATIO_FORCE_16_9 = 6
 
-  if (!fs.existsSync(gameSettingsPath)) {
-    throw new Error('Error: could not find game settings file')
-  }
-
-  let newSettings = [
-    '[Gecko]',
-    '[Gecko_Enabled]',
-    '$Optional: Game Music OFF',
-    '$Optional: Widescreen 16:9',
-    '[Gecko_Disabled]',
-    '$Optional: Show Player Names',
-  ]
-  await fsPromises.writeFile(gameSettingsPath, newSettings.join('\n'))
-
-  await fsPromises.mkdir(path.dirname(graphicsSettingsPath), { recursive: true })
-  if (!fs.existsSync(graphicsSettingsPath)) {
-    await fsPromises.writeFile(graphicsSettingsPath, '')
-  }
-
-  let rl = readline.createInterface({
-    input: fs.createReadStream(graphicsSettingsPath),
-    crlfDelay: Infinity,
-  })
-  newSettings = []
-  const aspectRatioSetting = 6
-  for await (const line of rl) {
-    if (line.startsWith('AspectRatio')) {
-      newSettings.push(`AspectRatio = ${aspectRatioSetting}`)
-    } else if (line.startsWith('InternalResolutionFrameDumps')) {
-      newSettings.push(`InternalResolutionFrameDumps = True`)
-    } else if (line.startsWith('BitrateKbps')) {
-      if (Number.isFinite(bitrateKbps)) {
-        newSettings.push(`BitrateKbps = ${bitrateKbps}`)
-      } else {
-        newSettings.push(line)
-      }
-    } else if (line.startsWith('EFBScale')) {
-      if (Number.isFinite(quality)) {
-        newSettings.push(`EFBScale = ${quality}`)
-      } else {
-        newSettings.push(line)
-      }
-    } else {
-      newSettings.push(line)
-    }
-  }
-  await fsPromises.writeFile(graphicsSettingsPath, newSettings.join('\n'))
-
-  await fsPromises.mkdir(path.dirname(dolphinSettingsPath), { recursive: true })
-  if (!fs.existsSync(dolphinSettingsPath)) {
-    await fsPromises.writeFile(dolphinSettingsPath, '')
-  }
-
-  rl = readline.createInterface({
-    input: fs.createReadStream(dolphinSettingsPath),
-    crlfDelay: Infinity,
-  })
-  newSettings = []
-  for await (const line of rl) {
-    if (line.startsWith('DumpFrames ')) {
-      newSettings.push(`DumpFrames = True`)
-    } else if (line.startsWith('DumpFramesSilent ')) {
-      newSettings.push(`DumpFramesSilent = True`)
-    } else if (line.startsWith('DumpAudio ')) {
-      newSettings.push(`DumpAudio = True`)
-    } else if (line.startsWith('DumpAudioSilent ')) {
-      newSettings.push(`DumpAudioSilent = True`)
-    } else {
-      newSettings.push(line)
-    }
-  }
-  await fsPromises.writeFile(dolphinSettingsPath, newSettings.join('\n'))
+// Run once per process, before any worker records. Older versions of this
+// pipeline spawned Dolphin with no --user at all and rewrote the operator's
+// real profile in place, leaving them with a framedump rig; healRealProfile()
+// forces those dump flags back off.
+export async function prepareDolphin() {
+  const paths = { dolphinPath: config.dolphinPath, isoPath: config.ssbmIsoPath }
+  const why = dolphinStatus(paths)
+  if (why) throw new Error(`Dolphin is not runnable: ${why}`)
+  await healRealProfile(config.dolphinPath)
+  await appendRunLog('healRealProfile() ran against the real Dolphin profile', 'dolphin-heal', [])
 }
 
-export async function generateDolphinConfig(replay) {
-  const lastFrame = typeof replay.game_length_frames === 'number' ? replay.game_length_frames : 0
-  const startFrame = -123
-  let endFrame = Math.max(0, lastFrame - 1)
-  if (endFrame <= startFrame) {
-    endFrame = startFrame + 1
-  }
+// One throwaway profile per concurrent Dolphin. Mandatory: the dump path is a
+// property of the user dir, so workers sharing one would silently overwrite
+// each other's frames and produce footage from the wrong replay.
+const workerProfiles = new Map()
+export async function ensureWorkerProfile(workerId) {
+  const existing = workerProfiles.get(workerId)
+  if (existing) return existing
 
-  const dolphinConfig = {
-    mode: 'normal',
-    replay: replay.file_path,
-    startFrame,
-    endFrame,
-    isRealTimeMode: false,
-    commandId: `${crypto.randomBytes(12).toString('hex')}`,
+  const userDir = path.join(config.dolphinProfileDir, `worker-${workerId}`)
+  await fsPromises.rm(userDir, { recursive: true, force: true })
+
+  const opts = {
+    mode: 'record',
+    dolphinPath: config.dolphinPath,
+    // EFBScale is an enum, not a multiplier. Always passed: inheriting it is
+    // how a run ends up dumping at 4x and crawling.
+    efbScale: config.quality,
+    aspectRatio: ASPECT_RATIO_FORCE_16_9,
+    geckoIni: GECKO_INI,
   }
-  await fsPromises.mkdir(config.workingGamesDir, { recursive: true })
-  return fsPromises.writeFile(
-    path.join(config.workingGamesDir, `${pad(replay.index, 6)}.json`),
-    JSON.stringify(dolphinConfig)
+  if (Number.isFinite(config.bitrateKbps)) opts.bitrateKbps = config.bitrateKbps
+  // Left unset, the codec is inherited from the operator's profile, which is
+  // what this pipeline did before the runner existed.
+  if (config.dumpCodec) opts.dumpCodec = config.dumpCodec
+  if (config.emulationSpeed != null) opts.emulationSpeed = config.emulationSpeed
+
+  await buildProfile(userDir, opts)
+  await appendRunLog(
+    `built Dolphin profile for worker ${workerId} at ${userDir} ` +
+    `(efbScale=${config.quality}, dumpCodec=${config.dumpCodec ?? 'inherited'})`,
+    'dolphin-profile',
+    [],
   )
+  workerProfiles.set(workerId, userDir)
+  return userDir
 }
 
-export async function runDolphin(replay) {
+export async function runDolphin(replay, workerId) {
   const fileBasename = pad(replay.index, 6)
-  const dolphinArgs = [
-    '-i',
-    path.resolve(config.workingGamesDir, `${fileBasename}.json`),
-    '-o',
-    `${fileBasename}-unmerged`,
-    `--output-directory=${config.workingGamesDir}`,
-    '-b',
-    '-e',
-    config.ssbmIsoPath,
-    '--cout',
-  ]
+  const userDir = await ensureWorkerProfile(workerId)
+  await fsPromises.mkdir(config.workingGamesDir, { recursive: true })
 
-  await appendRunLog(`Dolphin playback for replay #${replay.index}`, config.dolphinPath, dolphinArgs)
-  const child = spawnProcess(config.dolphinPath, dolphinArgs)
-  killDolphinOnEndFrame(child)
-  await runChildProcess(child, {
-    name: 'Dolphin',
-    replayIndex: replay.index,
-    timeoutMs: config.dolphinTimeoutMs,
-  })
+  // The frame range comes from our database, so the runner never has to scan
+  // the .slp footer. endFrame stays (lastFrame - 1): frames -123..endFrame
+  // inclusive is exactly game_length_frames + 123, which is what the duration
+  // guard below and stitcher.js's LEAD_IN_FRAMES both assume.
+  const lastFrame = typeof replay.game_length_frames === 'number' ? replay.game_length_frames : 0
+  const startFrame = -DOLPHIN_LEAD_IN_FRAMES
+  let endFrame = Math.max(0, lastFrame - 1)
+  if (endFrame <= startFrame) endFrame = startFrame + 1
+
+  await appendRunLog(
+    `Dolphin record for replay #${replay.index} (userDir=${userDir}, frames ${startFrame}..${endFrame})`,
+    'dolphin-record',
+    [],
+  )
+
+  let res
+  try {
+    res = await record(
+      { dolphinPath: config.dolphinPath, isoPath: config.ssbmIsoPath },
+      replay.file_path,
+      {
+        outDir: config.workingGamesDir,
+        userDir,
+        baseName: `${fileBasename}-unmerged`,
+        // Workers share one workingGamesDir and the runner's default comm
+        // filename is fixed, so without this they would overwrite each other's
+        // comm and each record the other's replay.
+        commPath: path.join(config.workingGamesDir, `${fileBasename}.json`),
+        lastFrame: lastFrame > 0 ? lastFrame : undefined,
+        startFrame,
+        endFrame,
+        // Replaces the old wall-clock watchdog. SIGTERMs and resolves with
+        // stalled:true rather than discarding a partial dump — the duration
+        // guard below decides whether the footage is usable.
+        hardTimeoutMs: config.dolphinTimeoutMs,
+      },
+    )
+  } catch (err) {
+    throw new Error(`Dolphin record failed for replay #${replay.index}: ${err.message}`)
+  }
+
+  if (res.stalled) {
+    // Not a verdict: measured dumps at the moment of a stall have been anywhere
+    // from 27% to 94% complete. Log it and let the duration check judge.
+    await appendRunLog(
+      `Dolphin stalled on replay #${replay.index}: ${JSON.stringify(res.diagnostic)}`,
+      'dolphin-stall',
+      [],
+    )
+  }
 
   const expectedFrames = typeof replay.game_length_frames === 'number' ? replay.game_length_frames : null
   if (expectedFrames && expectedFrames > 0) {
     const expectedSeconds = (expectedFrames + DOLPHIN_LEAD_IN_FRAMES) / DOLPHIN_FPS
-    const outputPath = path.resolve(config.workingGamesDir, `${fileBasename}-unmerged.avi`)
+    const outputPath = res.avi
     let actualSeconds = null
     try {
       actualSeconds = await probeDurationSeconds(outputPath)
@@ -172,7 +155,8 @@ export async function runDolphin(replay) {
       throw new Error(
         `Dolphin recorded truncated .avi for replay #${replay.index}: ` +
         `expected ${expectedSeconds.toFixed(2)}s, got ${actualSeconds.toFixed(2)}s ` +
-        `(short by ${(expectedSeconds - actualSeconds).toFixed(2)}s)`
+        `(short by ${(expectedSeconds - actualSeconds).toFixed(2)}s)` +
+        (res.stalled ? ` [stalled: ${res.diagnostic?.reason ?? 'unknown'}]` : '')
       )
     }
   }

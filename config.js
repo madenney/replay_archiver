@@ -1,4 +1,5 @@
 import 'dotenv/config'
+import os from 'os'
 import path from 'path'
 
 const requiredEnvVars = [
@@ -10,6 +11,10 @@ const requiredEnvVars = [
   'FFMPEG_TIMEOUT_MS',
   'OVERLAY_TIMEOUT_MS',
   'STITCH_MIN_TOTAL_MINUTES',
+  // EFBScale for the Dolphin dump. Required because leaving it unset makes a
+  // recording inherit whatever resolution the operator last played at — one
+  // such run produced a 25GB AVI at ~4fps for a 75-second game.
+  'QUALITY',
   'ARCHIVE_TITLE',
   'YOUTUBE_CLIENT_ID',
   'YOUTUBE_CLIENT_SECRET',
@@ -64,6 +69,31 @@ function parseBooleanEnv(key, defaultValue) {
 const scratchDir = process.env.SCRATCH_DIR || null
 const scratchGamesDir = scratchDir ? path.join(scratchDir, 'games') : null
 
+// Dolphin encodes the frame dump on a single thread, and that thread is the
+// recording speed limit. The codec is therefore the biggest lever on how long a
+// bulk archive takes, and it is a quality/speed/disk trade-off only the operator
+// can make — so it is configuration, not a constant.
+//
+//   unset     inherit the Dolphin profile's own setting (previous behaviour)
+//   ffv1      lossless. 0.77x realtime at native, but only 0.10x at high EFB
+//   utvideo   ~bit-exact and ~8x faster than ffv1 at high EFB (0.81x), but
+//             writes ~12GB per 75s game and needs an even dump width, so it is
+//             refused at QUALITY=2 (native is 939 wide)
+//   mpeg4     lossy (about -6 dB), 3.0-3.6x realtime with EMULATION_SPEED=0
+//   h264      refused by the runner — it drops the last ~50 frames at SIGTERM
+const DUMP_CODECS = ['ffv1', 'utvideo', 'mpeg4']
+function parseDumpCodec() {
+  const raw = (process.env.DUMP_CODEC || '').split('#')[0].trim().toLowerCase()
+  if (!raw) return null
+  if (raw === 'h264') {
+    throw new Error('DUMP_CODEC=h264 is refused: Dolphin drops the last ~50 frames of an h264 dump at SIGTERM')
+  }
+  if (!DUMP_CODECS.includes(raw)) {
+    throw new Error(`Invalid DUMP_CODEC: ${raw}. Expected one of ${DUMP_CODECS.join(', ')}, or unset to inherit the profile.`)
+  }
+  return raw
+}
+
 export const config = {
   outputDir: process.env.OUTPUT_DIR,
   gamesDir: path.join(process.env.OUTPUT_DIR, 'games'),
@@ -96,6 +126,17 @@ export const config = {
   // indefinitely.
   maxReplayErrors: parseNumberEnv('MAX_REPLAY_ERRORS', 3),
   slippiUpdate: parseNumberEnv('SLIPPI_UPDATE', 7950),
+  // Dump codec: see DUMP_CODECS above. null = inherit the profile.
+  dumpCodec: parseDumpCodec(),
+  // [Core] EmulationSpeed. 0 = unlimited; only helps when the encoder is not
+  // the bottleneck (i.e. with mpeg4, not with ffv1 at high EFB). Output is
+  // bit-identical where it applies. null = inherit.
+  emulationSpeed: parseNumberEnv('EMULATION_SPEED', null),
+  // Where the per-worker throwaway Dolphin profiles are built. One per
+  // concurrent Dolphin is mandatory: the dump path is a property of the user
+  // dir, so two Dolphins sharing one silently overwrite each other's frames.
+  // Keep it on local disk, never on a network mount.
+  dolphinProfileDir: process.env.DOLPHIN_PROFILE_DIR || path.join(os.tmpdir(), 'replay_archiver_dolphin'),
   // The archive owner's own player, used to tell them apart from opponents in
   // overlays and index reports. Comma-separated; matched case-insensitively,
   // codes exactly and tags as substrings.

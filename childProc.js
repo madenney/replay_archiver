@@ -1,18 +1,23 @@
 import { spawn } from 'child_process'
+import { killTree } from 'slippi-dolphin-runner'
 
-// Kill a child and everything it spawned via its process group.
-// spawnProcess uses { detached: true } so each child becomes its own pgroup
-// leader (setsid on posix); process.kill(-pid, sig) targets that whole group.
-// Prevents the AppImage-inner-binary orphan pattern where SIGKILLing the
-// wrapper leaves the real Dolphin/ffmpeg running reparented under init.
-export const killTree = (child, signal = 'SIGKILL') => {
-  if (!child || !child.pid) return
-  try {
-    process.kill(-child.pid, signal)
-  } catch (_) {
-    try { child.kill(signal) } catch (__) { /* ignore */ }
-  }
-}
+// This file is now only for ffmpeg and overlay.py. Dolphin is spawned by
+// slippi-dolphin-runner, which owns its own stdout parsing, stall watchdog and
+// process-tree kill. What used to live here and why it is gone:
+//
+//   killDolphinOnEndFrame  the [CURRENT_FRAME] matcher. It used
+//                          `line.includes('[CURRENT_FRAME] ' + endFrame)`, so
+//                          frame 845 matched inside 8454 and the dump was cut
+//                          to a tenth of the game; it also split stdout on
+//                          '\r\n' only, and never reassembled a line split
+//                          across two chunks.
+//   killTree (pgroup)      process.kill(-pid). The package walks the actual
+//                          process tree instead, which is what an AppImage
+//                          needs — it execs, so the emulator is not the direct
+//                          child.
+//   the wall-clock timeout  for Dolphin it is now record()'s hardTimeoutMs,
+//                          which SIGTERMs and still hands back the partial
+//                          dump to be judged, rather than discarding it.
 
 export const runChildProcess = (child, { name, replayIndex, timeoutMs }) =>
   new Promise((resolve, reject) => {
@@ -29,6 +34,7 @@ export const runChildProcess = (child, { name, replayIndex, timeoutMs }) =>
       });
     };
 
+    // Drain both pipes. An unread stderr fills at ~64KB and blocks the child.
     if (child.stdout) {
       child.stdout.on('data', (data) => pushLog(`${name}#${replayIndex} stdout`, data));
     }
@@ -55,7 +61,7 @@ export const runChildProcess = (child, { name, replayIndex, timeoutMs }) =>
       timeoutMs != null
         ? setTimeout(() => {
             const err = new Error(`${name} timed out for replay #${replayIndex} after ${timeoutMs}ms`);
-            killTree(child, 'SIGKILL');
+            if (child.pid) killTree(child.pid);
             done(err);
           }, timeoutMs)
         : null;
@@ -70,33 +76,4 @@ export const runChildProcess = (child, { name, replayIndex, timeoutMs }) =>
     });
   });
 
-// detached:true puts the child in its own process group so killTree() can
-// signal the whole tree. We do NOT unref — parent still waits for exit.
-export const spawnProcess = (cmd, args) => spawn(cmd, args, { detached: true });
-
-export const killDolphinOnEndFrame = (child) => {
-  if (!child || !child.stdout) {
-    return;
-  }
-
-  let endFrame = Infinity;
-  child.stdout.setEncoding('utf8');
-  child.stdout.on('data', (data) => {
-    const lines = data.split('\r\n');
-    lines.forEach((line) => {
-      if (line.includes(`[PLAYBACK_END_FRAME]`)) {
-        const regex = /\[PLAYBACK_END_FRAME\] ([0-9]*)/;
-        const match = regex.exec(line);
-        if (match && match[1]) {
-          const parsed = parseInt(match[1], 10);
-          endFrame = Number.isNaN(parsed) ? Infinity : parsed;
-        } else {
-          endFrame = Infinity;
-        }
-      } else if (line.includes(`[CURRENT_FRAME] ${endFrame}`)) {
-        killTree(child, 'SIGTERM');
-      }
-    });
-  });
-};
-
+export const spawnProcess = (cmd, args) => spawn(cmd, args);
