@@ -18,7 +18,20 @@ const DOLPHIN_FPS = 60
 // whose duration is much shorter than the game. Throwing here feeds into the
 // worker's recordReplayError path (auto-skip after MAX_REPLAY_ERRORS attempts)
 // instead of letting the truncation propagate through overlay -> stitch.
-const DOLPHIN_DURATION_TOLERANCE_SECONDS = 5
+//
+// This is a RATIO, not an exact frame count, because dumps are not frame-count
+// stable across codec and emulation speed — measured 3504-3534 frames for an
+// expected 3600, i.e. up to 2.7% short with nothing wrong. A fixed 5s tolerance
+// (what this used to be) silently becomes a false failure on longer games the
+// moment someone changes DUMP_CODEC: 2.7% of a 4-minute game is 6.4s. Three
+// such failures auto-skip the replay, so the old form could have dropped games
+// just because the codec was tuned.
+//
+// A real truncation is nothing like 3% — measured partial dumps sit at 27-94%
+// of the game — so 5% separates the two cleanly. The absolute floor keeps very
+// short games from being judged on a fraction of a second.
+const DOLPHIN_DURATION_MIN_RATIO = 0.95
+const DOLPHIN_DURATION_FLOOR_SECONDS = 1
 
 // The Gecko codes this archive records with. Written into each throwaway
 // profile's GameSettings/GALE01.ini, never the operator's own.
@@ -151,11 +164,17 @@ export async function runDolphin(replay, workerId) {
     if (actualSeconds == null) {
       throw new Error(`Dolphin produced unreadable .avi for replay #${replay.index} (ffprobe returned no duration)`)
     }
-    if (expectedSeconds - actualSeconds > DOLPHIN_DURATION_TOLERANCE_SECONDS) {
+    const shortfall = expectedSeconds - actualSeconds
+    const allowedShortfall = Math.max(
+      DOLPHIN_DURATION_FLOOR_SECONDS,
+      expectedSeconds * (1 - DOLPHIN_DURATION_MIN_RATIO),
+    )
+    if (shortfall > allowedShortfall) {
       throw new Error(
         `Dolphin recorded truncated .avi for replay #${replay.index}: ` +
         `expected ${expectedSeconds.toFixed(2)}s, got ${actualSeconds.toFixed(2)}s ` +
-        `(short by ${(expectedSeconds - actualSeconds).toFixed(2)}s)` +
+        `(short by ${shortfall.toFixed(2)}s = ${(shortfall / expectedSeconds * 100).toFixed(1)}%, ` +
+        `allowed ${allowedShortfall.toFixed(2)}s)` +
         (res.stalled ? ` [stalled: ${res.diagnostic?.reason ?? 'unknown'}]` : '')
       )
     }

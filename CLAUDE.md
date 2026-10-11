@@ -38,7 +38,7 @@ During a run, `q` requests a graceful shutdown (finish in-flight replays); Ctrl+
 
 For each replay, a normal worker runs, all in `config.workingGamesDir`, with files named by 6-digit zero-padded idx (`pad(idx, 6)`):
 
-1. `runDolphin` → `NNNNNN-unmerged.avi` + `.wav`, via `slippi-dolphin-runner`'s `record()`. The package owns the spawn, the `--cout` frame parsing, the stall watchdog and the process-tree kill; this repo keeps the ffprobe duration guard, which is what actually judges the footage. A stall resolves with `stalled: true` rather than throwing — measured dumps at the moment of a stall have been 27%–94% complete, so the duration check decides, not the watchdog.
+1. `runDolphin` → `NNNNNN-unmerged.avi` + `.wav`, via `slippi-dolphin-runner`'s `record()`. The package owns the spawn, the `--cout` frame parsing, the stall watchdog and the process-tree kill; this repo keeps the ffprobe duration guard, which is what actually judges the footage. A stall resolves with `stalled: true` rather than throwing — measured dumps at the moment of a stall have been 27%–94% complete, so the duration check decides, not the watchdog. That check is a **ratio** (5%), not an exact frame count: dumps are not frame-count stable across codec and emulation speed (3504–3534 for an expected 3600), so an absolute tolerance would turn a `DUMP_CODEC` change into false truncation failures on long games.
    Each worker gets its own throwaway `--user` profile from `ensureWorkerProfile(workerId)`; sharing one would make concurrent Dolphins silently overwrite each other's frames. `commPath` is per-replay for the same reason. `endFrame` is `game_length_frames - 1`, which is what makes the dump exactly `game_length_frames + 123` frames.
 2. `mergeVideo` → `NNNNNN-merged.avi` (ffmpeg, `-c:v copy`, just muxes audio)
 3. `addOverlay` → `NNNNNN.avi` via `python3 overlay.py` — **the only lossy encode** (libx264, or `hevc_nvenc` when `USE_NVENC` is set)
@@ -79,7 +79,7 @@ Two worker machines share the DB and an NFS `OUTPUT_DIR`. Settings that differ p
 - `USE_NVENC`: GPU overlay encode (only on the machine with the NVIDIA card).
 - `NUM_WORKERS`: in a full run one slot is the stitcher, so record parallelism is `NUM_WORKERS - 1`.
 
-Dolphin settings are built per worker by `ensureWorkerProfile()` in `media.js` via the runner's `buildProfile()`; the operator's real profile is never written. `prepareDolphin()` runs `healRealProfile()` once at startup to undo damage from the older in-place version of this pipeline. `DUMP_CODEC` is the recording speed lever and is documented in the README — Dolphin encodes on one thread, so it is worth 8x.
+Dolphin settings are built per worker by `ensureWorkerProfile()` in `media.js` via the runner's `buildProfile()`; the operator's real profile is never written. `prepareDolphin()` runs `healRealProfile()` once at startup to undo damage from the older in-place version of this pipeline. `DUMP_CODEC` is the recording speed lever, documented in the README with the full measurement table. Dolphin encodes on one thread, so at `QUALITY` 4+ `utvideo` is 5-8x faster than ffv1 — but at `QUALITY` 3 and below the ceiling is emulation, not the encoder, and every codec converges around 1.27x.
 
 ### Logs
 

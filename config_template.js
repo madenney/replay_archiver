@@ -19,20 +19,26 @@
 // last played at can silently dump at 4x.
 //
 // DUMP_CODEC=utvideo
-// The recording speed lever. Dolphin encodes on one thread and that thread is
-// the limit, so for a bulk archive this is the difference between a day and a
-// week. Measured at QUALITY=6:
-//   ffv1     0.10x realtime, lossless  (0.77x at native, where it is the only option)
-//   utvideo  0.81x, bit-exact, ~8x faster than ffv1, but ~12GB per 75s game
-//            and refused at QUALITY=2 (native is 939px wide -- needs even width)
-//   mpeg4    3.0-3.6x with EMULATION_SPEED=0, lossy (about -6 dB)
-//   h264     refused -- Dolphin drops the last ~52 frames at close
-//   unset    inherit the Dolphin profile's own setting
+// The recording speed lever. Dolphin encodes on ONE thread, so for a bulk
+// archive this is the difference between a day and a week. Which codec wins
+// depends on QUALITY -- at large sizes the encoder is the bottleneck, at small
+// sizes emulation is, and everything converges:
+//   QUALITY 6 (3x)   ffv1 0.10x   utvideo 0.81x
+//   QUALITY 4 (2x)   ffv1 0.34x   utvideo 1.81x
+//   QUALITY 3 (1.5x) ffv1 0.50x   utvideo 1.27x   mpeg4 1.28x  <- all converge;
+//                    lossy buys NOTHING over lossless at this size
+//   QUALITY 2 (1x)   ffv1 0.77x   utvideo refused (939px, needs even width)
+//                    mpeg4 ~4x with EMULATION_SPEED=0, about -6 dB
+//   h264   refused -- Dolphin drops the last ~52 frames at close
+//   unset  inherit the Dolphin profile's own setting
+// utvideo is bit-exact and writes ~12GB per 75s game. Three concurrent utvideo
+// workers measured 2.07x aggregate.
 //
 // EMULATION_SPEED=0
-// [Core] EmulationSpeed; 0 = unlimited. Bit-identical where it applies, and
-// only helps when the encoder is not the bottleneck -- pair it with mpeg4,
-// not with ffv1 at a high QUALITY.
+// [Core] EmulationSpeed; 0 = unlimited. Bit-identical output where it applies.
+// Helps THROUGHPUT only when the encoder is not the bottleneck, but it also
+// shortens BOOT regardless of codec (first frame 3.8s -> 1.1s), which dominates
+// short dumps.
 //
 // DOLPHIN_PROFILE_DIR="/local/disk/dolphin-profiles"
 // Where the per-worker throwaway Dolphin profiles are built. One per

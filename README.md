@@ -112,28 +112,48 @@ node scripts/finish_tail.js
 
 ### Recording speed — `DUMP_CODEC`
 
-Dolphin encodes the frame dump **on a single thread, and that thread is the
-recording speed limit**. For a bulk archive this is the difference between a
-run that takes a day and one that takes a week, so it is worth setting
-deliberately rather than inheriting.
+Dolphin encodes the frame dump **on a single thread**. For a bulk archive this
+is the difference between a run that takes a day and one that takes a week, so
+it is worth setting deliberately rather than inheriting.
 
-Measured, at `QUALITY=6` (3x) unless noted:
+**The shape matters more than any single number: which codec wins depends on
+`QUALITY`.** At large sizes the encoder is the bottleneck and `utvideo` is a
+huge win; at small sizes the bottleneck becomes emulation itself, every codec
+converges, and lossy buys you nothing.
 
-| `DUMP_CODEC` | speed | quality | notes |
+Measured on an RTX 5080 + i9-12900K, as multiples of realtime:
+
+| `QUALITY` (EFBScale) | `ffv1` | `utvideo` | `mpeg4` |
 |---|---|---|---|
-| `ffv1` | **0.10x** realtime (~12 min per game) | lossless | 0.77x at native resolution, where it is the only option |
-| `utvideo` | **0.81x** — about **8x faster** than ffv1 | bit-exact | ~12 GB per 75 s game. Needs an even dump width, so it is **refused at `QUALITY=2`** (native is 939 px wide) |
-| `mpeg4` | **3.0–3.6x** with `EMULATION_SPEED=0` | lossy, about −6 dB | |
-| `h264` | — | — | **refused**: Dolphin drops the last ~52 frames when the dump is closed |
-| unset | — | — | inherits the Dolphin profile's own setting (what this pipeline did before) |
+| 6 (3x) | 0.10x | **0.81x** | — |
+| 4 (2x) | 0.34x | **1.81x** | — |
+| 3 (1.5x) | 0.50x | 0.99x → **1.27x** with `EMULATION_SPEED=0` | 0.99x → 1.28x |
+| 2 (1x native) | **0.77x** | refused — needs an even dump width, native is 939 px | ~4x with `EMULATION_SPEED=0`, about −6 dB |
 
-`EMULATION_SPEED=0` is bit-identical output where it applies, and only helps
-when the encoder is *not* the bottleneck — so it is worth pairing with `mpeg4`,
-and pointless with `ffv1` at a high `QUALITY`.
+Reading it:
 
-Parallelism is the other lever and it compounds: three concurrent `utvideo`
-workers measured **2.07x aggregate**. Weigh that against disk, since the
-intermediates are large and transient.
+- **At `QUALITY` 4 and above, `utvideo` is the answer** — roughly 5x faster than
+  ffv1 at EFB 4, 8x at EFB 6, and bit-exact. It writes ~12 GB per 75 s game.
+- **At `QUALITY` 3 and below the ceiling is emulation, not the encoder.** Both
+  non-ffv1 codecs stop around 1.27x, so **lossy buys nothing over lossless at
+  small sizes** — `mpeg4`'s advantage is a native-resolution thing only.
+- `h264` is **refused**: Dolphin drops the last ~52 frames when the dump closes.
+- Unset inherits the Dolphin profile's own setting, which is what this pipeline
+  did before adopting the runner.
+
+`EMULATION_SPEED=0` is bit-identical output where it applies. It helps
+throughput only when the encoder is *not* the bottleneck — but it also shortens
+**boot regardless of codec** (first frame 3.8 s → 1.1 s), which dominates short
+dumps.
+
+Parallelism compounds: three concurrent `utvideo` workers measured **2.07x
+aggregate**. Weigh that against disk, since the intermediates are large.
+
+One caveat if you ever compare outputs: **dumps are not frame-count stable**
+across codec and emulation speed — 3504–3534 frames for an expected 3600 is
+normal. Hold both fixed when byte-comparing, and note that the duration guard in
+`media.js` is deliberately a **ratio** (5%) rather than an exact frame count for
+this reason.
 
 ### Publishing
 
