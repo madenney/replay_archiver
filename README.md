@@ -132,8 +132,20 @@ Measured on an RTX 5080 + i9-12900K, as multiples of realtime:
 
 Reading it:
 
-- **At `QUALITY` 4 and above, `utvideo` is the answer** — roughly 5x faster than
-  ffv1 at EFB 4, 8x at EFB 6, and bit-exact. It writes ~12 GB per 75 s game.
+- **At `QUALITY` 4 and above, `utvideo` is usually the answer** — roughly 5x
+  faster than ffv1 at EFB 4, 8x at EFB 6, and bit-exact. It writes ~12 GB per
+  75 s game.
+- **Check the dump width before switching to `utvideo`.** It needs an even
+  width, and Dolphin writes *no video at all* when it is odd. The runner only
+  refuses `utvideo` at `QUALITY=2` (939 px), but that check is keyed on the
+  scale, not the resulting width — and **`QUALITY=5` dumps 2347 px, which is
+  also odd**, with no error raised. Record one game and confirm you got video
+  before trusting a bulk run:
+
+  ```sh
+  ffprobe -v error -select_streams v:0 -show_entries stream=width,height \
+    -of csv=p=0 <a-dump>.avi      # width must be even for utvideo
+  ```
 - **At `QUALITY` 3 and below the ceiling is emulation, not the encoder.** Both
   non-ffv1 codecs stop around 1.27x, so **lossy buys nothing over lossless at
   small sizes** — `mpeg4`'s advantage is a native-resolution thing only.

@@ -28,6 +28,10 @@
 //   QUALITY 3 (1.5x) ffv1 0.50x   utvideo 1.27x   mpeg4 1.28x  <- all converge;
 //                    lossy buys NOTHING over lossless at this size
 //   QUALITY 2 (1x)   ffv1 0.77x   utvideo refused (939px, needs even width)
+// WARNING: utvideo needs an EVEN dump width or Dolphin writes no video at all.
+// The runner only refuses it at QUALITY=2; the check is keyed on the scale, not
+// the width. QUALITY=5 dumps 2347px (also odd) and is accepted with no error.
+// Record one game and ffprobe the width before trusting a bulk run.
 //                    mpeg4 ~4x with EMULATION_SPEED=0, about -6 dB
 //   h264   refused -- Dolphin drops the last ~52 frames at close
 //   unset  inherit the Dolphin profile's own setting
